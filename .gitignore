@@ -1,0 +1,9 @@
+.build/
+build/
+.swiftpm/
+*.xcodeproj
+.DS_Store
+brag-output*/
+showcase-*/
+__pycache__/
+*.pyc
