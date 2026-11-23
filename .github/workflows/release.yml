@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-26   # Xcode 26 SDK (needed for Liquid Glass)
+    env:
+      HAS_CERT: ${{ secrets.SIGNING_CERT_P12 != '' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Optional: a self-signed code-signing certificate (base64 .p12) keeps the signature
+      # stable between releases, so users don't have to re-grant permissions after updating.
+      - name: Import signing certificate
+        if: env.HAS_CERT == 'true'
+        env:
+          CERT_P12: ${{ secrets.SIGNING_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
+        run: |
+          echo "$CERT_P12" | base64 --decode > cert.p12
+          security create-keychain -p ci build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p ci build.keychain
+          security import cert.p12 -k build.keychain -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k ci build.keychain
+          rm cert.p12
+          echo "SIGN_ID=Notchi Self-Signed" >> "$GITHUB_ENV"
+
+      - name: Build app (universal)
+        env:
+          ARCHS: "--arch arm64 --arch x86_64"
+        run: ./scripts/build-app.sh
+
+      - name: Package DMG
+        run: ./scripts/make-dmg.sh
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: build/Notchi.dmg
+          generate_release_notes: true
