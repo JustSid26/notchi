@@ -1,0 +1,102 @@
+#!/bin/bash
+# island — push live activities to Notchi from anywhere.
+#
+#   island push --id build --title "Building web" [--subtitle s] [--progress 0.4]
+#               [--state running|done|failed|attention] [--icon sf.symbol] [--tint blue|#ff8800] [--ttl 6]
+#   island end  --id build
+#   island run  [--title "Tests"] -- <command …>   # shows progress while it runs, ✓/✗ when done
+#   island ask  "what's a good name for a cat?"
+#   island open
+#   island tab add ["name"]     # pin this terminal tab to the island (up to 10)
+#   island tab remove           # unpin this terminal tab
+#   island claude-hook <working|attention|done|end>   # used by Claude Code hooks
+set -euo pipefail
+
+urlencode() {
+  local LC_ALL=C s="$1" out="" c i hex
+  for ((i = 0; i < ${#s}; i++)); do
+    c="${s:i:1}"
+    case "$c" in
+      [a-zA-Z0-9.~_-]) out+="$c" ;;
+      *) printf -v hex '%%%02X' "'$c"; out+="$hex" ;;
+    esac
+  done
+  printf '%s' "$out"
+}
+
+send() { open -g "notchi://$1"; }
+
+usage() { sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit "${1:-0}"; }
+
+# Which terminal tab are we in? Works from an interactive shell and from inside Claude Code.
+this_tab_query() {
+  local t iterm app
+  t="$(ps -o tty= -p $$ 2>/dev/null | tr -d ' ' || true)"
+  case "$t" in ""|"?"|"??") t="$(tty 2>/dev/null || true)"; [ "$t" = "not a tty" ] && t="" ;; *) t="/dev/$t" ;; esac
+  iterm="${ITERM_SESSION_ID:-}"; iterm="${iterm#*:}"
+  if [ -n "${ITERM_SESSION_ID:-}" ]; then app="iTerm2"
+  elif [ "${TERM_PROGRAM:-}" = "Apple_Terminal" ]; then app="Terminal"
+  else app="${TERM_PROGRAM:-terminal}"; fi
+  printf 'tty=%s&iterm=%s&app=%s' "$(urlencode "$t")" "$(urlencode "$iterm")" "$(urlencode "$app")"
+}
+
+cmd="${1:-}"; [ -z "$cmd" ] && usage 1; shift || true
+
+case "$cmd" in
+  push|end)
+    query=""
+    while [ $# -gt 0 ]; do
+      key="${1#--}"; val="${2:-}"
+      [ "$key" = "$1" ] && { echo "unexpected argument: $1" >&2; usage 1; }
+      query+="${query:+&}${key}=$(urlencode "$val")"
+      shift 2 || shift
+    done
+    send "$cmd?$query"
+    ;;
+  run)
+    title=""
+    while [ $# -gt 0 ] && [ "$1" != "--" ]; do
+      case "$1" in --title) title="$2"; shift 2 ;; *) break ;; esac
+    done
+    [ "${1:-}" = "--" ] && shift
+    [ $# -eq 0 ] && usage 1
+    title="${title:-$*}"
+    id="run-$$"
+    start=$(date +%s)
+    send "push?id=$id&title=$(urlencode "$title")&state=running&icon=terminal.fill"
+    set +e; "$@"; code=$?; set -e
+    took=$(( $(date +%s) - start ))
+    if [ $code -eq 0 ]; then
+      send "push?id=$id&title=$(urlencode "$title")&subtitle=$(urlencode "done in ${took}s")&state=done"
+    else
+      send "push?id=$id&title=$(urlencode "$title")&subtitle=$(urlencode "exit $code after ${took}s")&state=failed&ttl=12"
+    fi
+    exit $code
+    ;;
+  tab)
+    sub="${1:-add}"; shift || true
+    case "$sub" in
+      add)    send "tab?action=add&$(this_tab_query)&name=$(urlencode "${*:-}")"
+              echo "📌 Pinned this tab to Notchi" ;;
+      remove|rm) send "tab?action=remove&$(this_tab_query)"
+              echo "Unpinned this tab" ;;
+      *) echo "usage: island tab add [name] | island tab remove" >&2; exit 1 ;;
+    esac
+    ;;
+  claude-hook)
+    # Called by Claude Code hooks. Must be quiet, quick, and never fail the hook.
+    event="${1:-}"
+    payload=""
+    if [ ! -t 0 ]; then payload="$(cat 2>/dev/null || true)"; fi
+    msg=""
+    if [ "$event" = "attention" ] && [ -n "$payload" ]; then
+      msg="$(printf '%s' "$payload" | plutil -extract message raw -o - - 2>/dev/null || true)"
+    fi
+    send "claude?event=$(urlencode "$event")&$(this_tab_query)&msg=$(urlencode "$msg")" >/dev/null 2>&1 || true
+    exit 0
+    ;;
+  ask)  send "ask?q=$(urlencode "$*")" ;;
+  open) send "open" ;;
+  -h|--help|help) usage 0 ;;
+  *) echo "unknown command: $cmd" >&2; usage 1 ;;
+esac
