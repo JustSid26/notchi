@@ -310,6 +310,7 @@ struct Scrubber: View {
 struct ActivitiesCard: View {
     @ObservedObject var activities: ActivityCenter
     @ObservedObject var battery: BatteryMonitor
+    @ObservedObject private var backend = Backend.shared
     var maxRows = 2
 
     private struct Row: Identifiable {
@@ -328,7 +329,8 @@ struct ActivitiesCard: View {
     }
 
     private var rows: [Row] {
-        var r: [Row] = activities.items.sorted { ($0.rank, $0.updated) > ($1.rank, $1.updated) }.map {
+        // Ordered by the Java backend's heap when it's running, locally otherwise.
+        var r: [Row] = activities.ordered(by: backend.liveOrder).map {
             Row(id: $0.id, symbol: $0.symbol, title: $0.title, subtitle: $0.subtitle, progress: $0.progress,
                 tint: $0.tint, activity: $0)
         }
@@ -347,6 +349,14 @@ struct ActivitiesCard: View {
                 if rows.count > 1 {
                     Text("· \(rows.count)").font(.system(size: 9, weight: .bold).monospacedDigit())
                         .foregroundStyle(.white.opacity(0.35))
+                }
+                if backend.connected {
+                    Spacer(minLength: 4)
+                    Text("HEAP").font(.system(size: 7.5, weight: .heavy)).tracking(0.8)
+                        .foregroundStyle(.white.opacity(0.3))
+                        .padding(.horizontal, 4).padding(.vertical, 1.5)
+                        .background(Capsule().strokeBorder(.white.opacity(0.15), lineWidth: 0.8))
+                        .help("Ordered by the Java backend: an indexed binary heap (needs you → running → failed → done). Repeated events are screened by a Bloom filter.")
                 }
             }
             if rows.isEmpty {
@@ -437,9 +447,18 @@ struct ActivitiesCard: View {
 struct AppsRow: View {
     @ObservedObject var c: IslandController
     @ObservedObject var apps: AppShelf
+    @ObservedObject private var backend = Backend.shared
     @State private var dropTargeted = false
 
     var body: some View {
+        if backend.launcherResults.isEmpty {
+            pinned
+        } else {
+            LaunchResultsRow(c: c, backend: backend)
+        }
+    }
+
+    private var pinned: some View {
         HStack(spacing: 6) {
             ForEach(Array(apps.apps.enumerated()), id: \.element.id) { i, app in
                 AppTile(app: app, index: i) { c.launch(app) }
@@ -472,11 +491,33 @@ struct AppsRow: View {
 struct AppsGrid: View {
     @ObservedObject var c: IslandController
     @ObservedObject var apps: AppShelf
+    @ObservedObject private var backend = Backend.shared
     @State private var dropTargeted = false
 
     private let columns = Array(repeating: GridItem(.fixed(48), spacing: 10), count: 5)
 
     var body: some View {
+        if backend.launcherResults.isEmpty {
+            pinned
+        } else {
+            LazyVGrid(columns: columns, alignment: .center, spacing: 8) {
+                ForEach(Array(backend.launcherResults.enumerated()), id: \.element.id) { i, r in
+                    LaunchResultTile(result: r, index: i) { c.openLaunchResult(r) }
+                }
+            }
+            .padding(10)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .background(CardBackground())
+            .overlay(alignment: .bottomTrailing) {
+                if let info = backend.launcherInfo {
+                    Text(info).font(.system(size: 8, weight: .medium).monospacedDigit())
+                        .foregroundStyle(.white.opacity(0.3)).padding(6)
+                }
+            }
+        }
+    }
+
+    private var pinned: some View {
         LazyVGrid(columns: columns, alignment: .center, spacing: 8) {
             ForEach(Array(apps.apps.enumerated()), id: \.element.id) { i, app in
                 AppTile(app: app, index: i) { c.launch(app) }
@@ -528,6 +569,96 @@ struct AppTile: View {
         }
         .help(app.name)
         .frame(width: 46)
+    }
+}
+
+// MARK: - Launcher (results from the Java backend's trie)
+
+/// While you type in the Claude bar, matching apps, terminal tabs and commands replace the
+/// pinned apps. Click one or press ⌘1…⌘6; Return still asks Claude.
+struct LaunchResultsRow: View {
+    @ObservedObject var c: IslandController
+    @ObservedObject var backend: Backend
+
+    var body: some View {
+        HStack(spacing: 4) {
+            ForEach(Array(backend.launcherResults.enumerated()), id: \.element.id) { i, r in
+                LaunchResultTile(result: r, index: i) { c.openLaunchResult(r) }
+            }
+            Spacer(minLength: 4)
+            VStack(alignment: .trailing, spacing: 2) {
+                Text("⌘1 opens · ⏎ asks Claude").font(.system(size: 8.5, weight: .semibold))
+                    .foregroundStyle(.white.opacity(0.45))
+                if let info = backend.launcherInfo {
+                    Text(info).font(.system(size: 8, weight: .medium).monospacedDigit())
+                        .foregroundStyle(.white.opacity(0.3))
+                }
+            }
+            .lineLimit(1)
+            .layoutPriority(-1)
+        }
+        .padding(.horizontal, 8)
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .background(CardBackground())
+    }
+}
+
+struct LaunchResultTile: View {
+    let result: Backend.LaunchResult
+    let index: Int
+    let action: () -> Void
+    @State private var hover = false
+
+    var body: some View {
+        Button(action: action) {
+            VStack(spacing: 2) {
+                icon.frame(width: 26, height: 26)
+                Text(result.label).font(.system(size: 8.5, weight: .medium, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.8))
+                    .lineLimit(1).truncationMode(.tail)
+                    .frame(width: 48)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .scaleEffect(hover ? 1.08 : 1)
+        .animation(.spring(response: 0.25, dampingFraction: 0.7), value: hover)
+        .onHover { hover = $0 }
+        .overlay(alignment: .topTrailing) {
+            if index < 9 {
+                Text("⌘\(index + 1)").font(.system(size: 7, weight: .bold, design: .rounded))
+                    .padding(.horizontal, 3).padding(.vertical, 0.5)
+                    .background(Capsule().fill(.black.opacity(0.6)))
+                    .foregroundStyle(.white.opacity(0.8))
+                    .offset(x: -2, y: -3)
+            }
+        }
+        .help(result.uses > 0 ? "\(result.label) · opened \(result.uses)×" : result.label)
+    }
+
+    @ViewBuilder private var icon: some View {
+        if result.kind == "app", let path = result.path {
+            Image(nsImage: AppIconCache.icon(for: path)).resizable().interpolation(.high)
+        } else {
+            Image(systemName: LauncherCatalog.symbol(for: result))
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(Color.islandAccent)
+                .frame(width: 26, height: 26)
+                .background(RoundedRectangle(cornerRadius: 7, style: .continuous).fill(.white.opacity(0.08)))
+        }
+    }
+}
+
+/// App icons for launcher results, loaded once per path.
+enum AppIconCache {
+    private static var cache: [String: NSImage] = [:]
+
+    static func icon(for path: String) -> NSImage {
+        if let i = cache[path] { return i }
+        let i = NSWorkspace.shared.icon(forFile: path)
+        if cache.count > 200 { cache.removeAll() }
+        cache[path] = i
+        return i
     }
 }
 
@@ -615,7 +746,16 @@ struct ClaudeBar: View {
             }
         }
         .animation(.easeOut(duration: 0.2), value: terminals.sentFlash)
-        .onChange(of: terminals.selectedID) { _, id in if id != nil { focused = true } }
+        .onChange(of: terminals.selectedID) { _, id in
+            if id != nil {
+                focused = true
+                Backend.shared.clearSearch()
+            }
+        }
+        // Typing here also searches apps, tabs and commands (the Java backend's trie).
+        .onChange(of: claude.input) { _, text in
+            if target == nil { Backend.shared.search(text) }
+        }
         .foregroundStyle(.white)
         .padding(.horizontal, 12)
         .frame(maxHeight: .infinity)

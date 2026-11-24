@@ -38,6 +38,9 @@ final class IslandController: ObservableObject {
     let activities = ActivityCenter()
     let terminals = TerminalTabs()
     let transcript = TranscriptStore()
+    /// The optional Java backend (LIVE heap, Bloom filter, launcher trie, Claude ETA).
+    let backend = Backend.shared
+    private var lastCatalogUpload = Date.distantPast
 
     private(set) var panel: NotchPanel!       // the island
     private(set) var catPanel: NotchPanel!    // the cat strip under the menu bar
@@ -260,6 +263,7 @@ final class IslandController: ObservableObject {
                                 tint: a.tint, progress: a.progress))
         }
         terminals.onStateChange = { [weak self] tab, state in self?.claudeStateChanged(tab, state) }
+        startBackend()
         transcript.screenProvider = { [weak self] tab, done in
             guard let self else { return done(nil) }
             self.terminals.screenText(of: tab, completion: done)
@@ -501,10 +505,91 @@ final class IslandController: ObservableObject {
         }
         if e.modifierFlags.contains(.command), let ch = e.charactersIgnoringModifiers,
            let n = Int(ch), (1...9).contains(n) {
-            if apps.launch(at: n - 1) { close() }
+            // While launcher results are showing, ⌘n opens result n instead of pinned app n.
+            let results = backend.launcherResults
+            if !results.isEmpty {
+                if n <= results.count { openLaunchResult(results[n - 1]) }
+            } else if apps.launch(at: n - 1) {
+                close()
+            }
             return nil
         }
         return e
+    }
+
+    // MARK: - Java backend
+
+    private func startBackend() {
+        backend.onConnect = { [weak self] in
+            guard let self else { return }
+            self.activities.resync()
+            self.uploadCatalog()
+            self.backend.refreshEtas(for: self.terminals.tabs)
+        }
+        backend.start()
+        // Pinned tabs changed: they're launcher items, and each has its own ETA.
+        // (Tabs also change on every title poll while Claude works; only ids and names matter here.)
+        terminals.$tabs.dropFirst()
+            .map { $0.map { "\($0.id.uuidString)|\($0.displayName)|\($0.customName ?? "")" } }
+            .removeDuplicates()
+            .debounce(for: .seconds(1), scheduler: DispatchQueue.main)
+            .sink { [weak self] _ in
+                guard let self, self.backend.connected else { return }
+                self.uploadCatalog()
+                self.backend.refreshEtas(for: self.terminals.tabs)
+            }
+            .store(in: &bag)
+        settings.$useBackend.dropFirst()
+            .sink { [weak self] _ in DispatchQueue.main.async { self?.backend.checkHealth() } }
+            .store(in: &bag)
+        $isOpen.removeDuplicates()
+            .filter { $0 }
+            .sink { [weak self] _ in
+                guard let self, self.backend.connected else { return }
+                self.backend.refreshLiveOrder()
+                // Pick up newly installed apps now and then.
+                if Date().timeIntervalSince(self.lastCatalogUpload) > 600 { self.uploadCatalog() }
+            }
+            .store(in: &bag)
+    }
+
+    private func uploadCatalog() {
+        lastCatalogUpload = Date()
+        LauncherCatalog.build(tabs: terminals.tabs) { [weak self] items in self?.backend.uploadCatalog(items) }
+    }
+
+    /// Opens a launcher result: an app, a pinned terminal tab or a Notchi command.
+    func openLaunchResult(_ r: Backend.LaunchResult) {
+        backend.recordUse(r.id)
+        claude.input = ""
+        backend.clearSearch()
+        switch r.kind {
+        case "app":
+            if let path = r.path {
+                NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: path),
+                                                   configuration: NSWorkspace.OpenConfiguration())
+            }
+            close()
+        case "tab":
+            if let tab = terminals.tabs.first(where: { "tab:\($0.id.uuidString)" == r.id }) { terminals.focus(tab) }
+            close()
+        default:
+            runCommand(r.id)
+        }
+    }
+
+    private func runCommand(_ id: String) {
+        switch id {
+        case "cmd:settings": openSettings()
+        case "cmd:dock-left": settings.dock = .left
+        case "cmd:dock-top": settings.dock = .notch
+        default:
+            if id.hasPrefix("cmd:theme-"), let t = IslandTheme(rawValue: String(id.dropFirst("cmd:theme-".count))) {
+                settings.theme = t
+            } else if id.hasPrefix("cmd:style-"), let st = IslandStyle(rawValue: String(id.dropFirst("cmd:style-".count))) {
+                settings.islandStyle = st
+            }
+        }
     }
 
     // MARK: - Actions
@@ -577,6 +662,7 @@ final class IslandController: ObservableObject {
         let id = "claude-\(tab.id.uuidString)"
         switch state {
         case .working:
+            backend.refreshEtas(for: [tab])
             activities.push(["id": id, "title": tab.displayName, "subtitle": "Claude is working…",
                              "state": "running", "icon": "sparkle", "tint": "accent", "ttl": "14400", "quiet": "1"])
         case .attention:
@@ -585,6 +671,7 @@ final class IslandController: ObservableObject {
             if settings.claudeSound { NSSound(named: NSSound.Name("Ping"))?.play() }
             cat.surprise()
         case .done(_, let took):
+            backend.recordDuration(tab: tab, seconds: took)   // feeds the ETA percentiles
             let t = took > 0 ? " · \(StatusDetail.fmt(took))" : ""
             activities.push(["id": id, "title": tab.displayName, "subtitle": "Claude finished\(t)",
                              "state": "done", "icon": "checkmark.circle.fill", "tint": "green", "ttl": "12"])

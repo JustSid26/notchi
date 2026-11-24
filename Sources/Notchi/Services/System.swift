@@ -113,6 +113,8 @@ struct LiveActivity: Identifiable, Equatable {
     var expires: Date?
     /// Tinted with the theme accent ("accent"/"claude" tints) — recoloured when the theme changes.
     var followsTheme = false
+    /// The tint as it was sent ("blue", "#ff8800", "accent"…), for the Java backend.
+    var tintName: String?
 
     var rank: Int {
         switch state {
@@ -126,6 +128,8 @@ struct LiveActivity: Identifiable, Equatable {
 
 final class ActivityCenter: ObservableObject {
     @Published private(set) var items: [LiveActivity] = []
+    /// Bumped by `end(id:)`, so a push that was still waiting for the backend is dropped.
+    private var generations: [String: Int] = [:]
     var onEvent: ((LiveActivity) -> Void)?
     private var timer: Timer?
 
@@ -134,15 +138,19 @@ final class ActivityCenter: ObservableObject {
     }
 
     var primary: LiveActivity? {
-        items.max { ($0.rank, $0.updated) < ($1.rank, $1.updated) }
+        let order = Backend.shared.liveOrder
+        if !order.isEmpty, let first = ordered(by: order).first { return first }
+        return items.max { ($0.rank, $0.updated) < ($1.rank, $1.updated) }
     }
 
     func push(_ q: [String: String]) {
-        let progress = q["progress"].flatMap(Double.init).map { min(max($0, 0), 1) }
+        // Double("nan") parses; NaN/∞ would poison sorting and JSON, so ignore non-finite values.
+        let finite: (String?) -> Double? = { $0.flatMap(Double.init).flatMap { $0.isFinite ? $0 : nil } }
+        let progress = finite(q["progress"]).map { min(max($0, 0), 1) }
         let state = LiveActivity.State(rawValue: q["state"] ?? "") ?? ((progress ?? 0) >= 1 ? .done : .running)
         let id = q["id"] ?? q["title"] ?? UUID().uuidString
         let defaultTTL: Double = state == .running ? 1800 : (state == .attention ? 30 : 6)
-        let ttl = q["ttl"].flatMap(Double.init) ?? defaultTTL
+        let ttl = finite(q["ttl"]) ?? defaultTTL
         let symbol = q["icon"] ?? {
             switch state {
             case .running: "gearshape.2.fill"
@@ -164,17 +172,83 @@ final class ActivityCenter: ObservableObject {
                              state: state, symbol: symbol, tint: tint, updated: Date(),
                              expires: ttl > 0 ? Date().addingTimeInterval(ttl) : nil)
         a.followsTheme = followsTheme
-        if let i = items.firstIndex(where: { $0.id == id }) {
-            let old = items[i]
-            items[i] = a
-            if (old.state != a.state || old.title != a.title) && q["quiet"] != "1" { onEvent?(a) }
-        } else {
-            items.append(a)
-            if q["quiet"] != "1" { onEvent?(a) }
+        a.tintName = q["tint"]
+        let quiet = q["quiet"] == "1"
+
+        // With the Java backend running, it decides first: its Bloom filter + event log drop
+        // events it has already seen (a retried webhook, a hook that fires twice…), and its heap
+        // orders the queue. Without it, the event is applied right here as before.
+        guard Backend.shared.connected else { return apply(a, quiet: quiet) }
+        var fields = Self.fields(for: a, ttl: ttl)
+        if let e = q["event"], !e.isEmpty { fields["eventId"] = String(e.prefix(256)) }
+        let generation = generations[id, default: 0]
+        Backend.shared.pushEvent(fields) { [weak self] verdict in
+            // Dropped as a repeat, or ended while the push was on its way.
+            guard let self, verdict != "duplicate", self.generations[id, default: 0] == generation else { return }
+            var fresh = a
+            fresh.updated = Date()
+            fresh.expires = ttl > 0 ? Date().addingTimeInterval(ttl) : nil
+            self.apply(fresh, quiet: quiet)
         }
     }
 
-    func end(id: String) { items.removeAll { $0.id == id } }
+    private func apply(_ a: LiveActivity, quiet: Bool) {
+        if let i = items.firstIndex(where: { $0.id == a.id }) {
+            let old = items[i]
+            items[i] = a
+            if (old.state != a.state || old.title != a.title) && !quiet { onEvent?(a) }
+        } else {
+            items.append(a)
+            if !quiet { onEvent?(a) }
+        }
+    }
+
+    func end(id: String) {
+        items.removeAll { $0.id == id }
+        generations[id, default: 0] += 1   // a push for this id still in flight must not bring it back
+        Backend.shared.endActivity(id)
+    }
+
+    /// Most urgent first: in the backend heap's order when it's connected, otherwise sorted here
+    /// (needs-you, running, failed, done; newest first). Anything the backend hasn't
+    /// acknowledged yet goes after the ordered ones.
+    func ordered(by order: [String]) -> [LiveActivity] {
+        let local = items.sorted { ($0.rank, $0.updated) > ($1.rank, $1.updated) }
+        guard !order.isEmpty else { return local }
+        var position: [String: Int] = [:]
+        for (i, id) in order.enumerated() where position[id] == nil { position[id] = i }
+        return local.enumerated().sorted { x, y in
+            switch (position[x.element.id], position[y.element.id]) {
+            case let (a?, b?): return a < b
+            case (.some, nil): return true
+            case (nil, .some): return false
+            case (nil, nil): return x.offset < y.offset
+            }
+        }.map(\.element)
+    }
+
+    /// The backend just (re)connected: send it what's on screen so both agree. Oldest first, so
+    /// the backend's "newest first" order matches what's shown.
+    func resync() {
+        let now = Date()
+        for a in items.sorted(by: { $0.updated < $1.updated }) {
+            let ttl = a.expires.map { max(1, $0.timeIntervalSince(now)) } ?? 0
+            var fields = Self.fields(for: a, ttl: ttl)
+            fields["eventId"] = "sync:\(a.id):\(a.updated.timeIntervalSince1970)"
+            Backend.shared.pushEvent(fields) { _ in }
+        }
+        Backend.shared.refreshLiveOrder()
+    }
+
+    private static func fields(for a: LiveActivity, ttl: Double) -> [String: Any] {
+        var f: [String: Any] = ["id": String(a.id.prefix(200)), "title": String(a.title.prefix(200)),
+                                "state": a.state.rawValue, "icon": String(a.symbol.prefix(100)),
+                                "ttl": min(max(ttl, 0), 7 * 24 * 3600)]
+        if let s = a.subtitle { f["subtitle"] = String(s.prefix(300)) }
+        if let p = a.progress { f["progress"] = p }
+        if let t = a.tintName, !t.isEmpty { f["tint"] = String(t.prefix(40)) }
+        return f
+    }
 
     /// Theme changed: recolour the activities that follow the accent.
     func retint(_ accent: Color) {

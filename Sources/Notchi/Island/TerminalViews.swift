@@ -121,6 +121,7 @@ struct TerminalsHeader: View {
 struct TerminalRow: View {
     let tab: TermTab
     @ObservedObject var terminals: TerminalTabs
+    @ObservedObject private var backend = Backend.shared
     @State private var hover = false
 
     /// The tab's colour in iTerm2 (right-click a tab → Tab Color), if it has one.
@@ -156,7 +157,7 @@ struct TerminalRow: View {
                 .buttonStyle(.plain)
                 .help("Open in \(tab.app)")
             } else {
-                StatusDetail(state: state)
+                StatusDetail(state: state, eta: backend.eta(for: tab))
             }
         }
         .padding(.horizontal, 7)
@@ -179,18 +180,26 @@ struct TerminalRow: View {
     }
 }
 
-/// Elapsed time while working, how long it took when done.
+/// Elapsed time while working (plus the usual run time when the Java backend knows it),
+/// how long it took when done.
 struct StatusDetail: View {
     let state: ClaudeState
+    var eta: Backend.Eta? = nil
 
     var body: some View {
         switch state {
         case .working(let since):
             TimelineView(.periodic(from: .now, by: 1)) { ctx in
-                Text(Self.fmt(ctx.date.timeIntervalSince(since)))
+                if let eta {
+                    Text(Self.fmt(ctx.date.timeIntervalSince(since)))
+                    + Text(" / ~\(Self.fmt(eta.p50))").foregroundStyle(.white.opacity(0.45))
+                } else {
+                    Text(Self.fmt(ctx.date.timeIntervalSince(since)))
+                }
             }
             .font(.system(size: 9.5, weight: .medium).monospacedDigit())
             .foregroundStyle(Color.islandAccent.opacity(0.9))
+            .help(eta.map { "Usually done in ~\(Self.fmt($0.p50)); 90% of runs within \(Self.fmt($0.p90)) (\($0.count) runs, \($0.scope)). Percentiles by randomized Quickselect in the Java backend." } ?? "")
         case .done(_, let took) where took > 0:
             Text(Self.fmt(took)).font(.system(size: 9.5, weight: .medium).monospacedDigit())
                 .foregroundStyle(Color(hex: 0x4CD97B).opacity(0.8))
