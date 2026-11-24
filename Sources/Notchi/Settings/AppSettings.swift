@@ -215,12 +215,15 @@ final class AppSettings: ObservableObject {
         static let theme = "islandTheme"
         static let islandStyle = "islandStyle"
         static let islandOpacity = "islandOpacity"
+        static let useBackend = "useJavaBackend"
     }
 
     @Published var showCat: Bool { didSet { d.set(showCat, forKey: K.showCat) } }
     @Published var pet: Pet { didSet { d.set(pet.rawValue, forKey: K.pet) } }
     /// Play a sound when Claude finishes (or needs approval) in a pinned terminal tab.
     @Published var claudeSound: Bool { didSet { d.set(claudeSound, forKey: K.claudeSound) } }
+    /// Use the Java backend (backend/ in the repo) when it's running on this Mac.
+    @Published var useBackend: Bool { didSet { d.set(useBackend, forKey: K.useBackend) } }
     @Published var coat: CatCoat { didSet { d.set(coat.rawValue, forKey: K.coat) } }
     @Published var dogCoat: DogCoat { didSet { d.set(dogCoat.rawValue, forKey: K.dogCoat) } }
     @Published var birdCoat: BirdCoat { didSet { d.set(birdCoat.rawValue, forKey: K.birdCoat) } }
@@ -273,6 +276,7 @@ final class AppSettings: ObservableObject {
         coat = CatCoat(rawValue: d.string(forKey: K.coat) ?? "") ?? .siamese
         pet = Pet(rawValue: d.string(forKey: K.pet) ?? "") ?? .cat
         claudeSound = d.object(forKey: K.claudeSound) as? Bool ?? true
+        useBackend = d.object(forKey: K.useBackend) as? Bool ?? true
         dogCoat = DogCoat(rawValue: d.string(forKey: K.dogCoat) ?? "") ?? .shiba
         birdCoat = BirdCoat(rawValue: d.string(forKey: K.birdCoat) ?? "") ?? .budgie
         walkRange = d.double(forKey: K.walkRange)
