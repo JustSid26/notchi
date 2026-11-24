@@ -7,3 +7,4 @@ brag-output*/
 showcase-*/
 __pycache__/
 *.pyc
+backend/target/
