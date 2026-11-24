@@ -103,6 +103,21 @@ island ask "explain this regex: ^\d{3}-\d{4}$"
 Under the hood each of these opens a URL, so anything that can open a URL can drive Notchi:
 `open -g "notchi://push?id=x&title=Hello&state=attention"`.
 
+## Java backend (optional)
+
+`backend/` is a plain-Java service that Notchi connects to when it's running on the same Mac. It takes over the algorithmic work:
+
+- **LIVE queue order:** an indexed binary heap.
+- **Duplicate events** (retried webhooks, hooks that fire twice): screened by a Bloom filter backed by an exact event log.
+- **Launcher:** type in the Claude bar to find apps, tabs and commands, using a trie.
+- **Claude ETA** in each terminal tab: percentiles by randomized Quickselect.
+
+```bash
+cd backend && ./mvnw -q package -DskipTests && java -jar target/notchi-backend.jar --demo
+```
+
+Notchi connects within a few seconds. **Settings → Java backend** shows what each algorithm is doing. Without the backend, Notchi works exactly as before. Details, API, tests and benchmarks are in [backend/README.md](backend/README.md).
+
 ## Build from source
 
 You need macOS 14+ and Swift 5.10+. The Xcode command-line tools are enough. Building Liquid Glass needs the macOS 26 SDK.
@@ -137,6 +152,7 @@ Sources/Notchi/
   Services/   now playing, pinned apps, Claude, terminal tabs, iTerm2 colours, live activities, shortcuts
   Settings/   preferences, themes, settings window
 bin/island    CLI (live activities, terminal tabs, Claude Code hooks)
+backend/      optional Java backend (heap, Bloom filter, trie, randomized Quickselect)
 ```
 
 ## License
