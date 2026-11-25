@@ -1,10 +1,16 @@
 package dev.notchi.backend;
 
+import dev.notchi.backend.activity.DemoActivity;
+import dev.notchi.backend.activity.ScreenTime;
+import dev.notchi.backend.activity.Workspaces;
+import dev.notchi.backend.clipboard.ClipboardHistory;
 import dev.notchi.backend.http.ApiServer;
 import dev.notchi.backend.http.NotchiApi;
 import dev.notchi.backend.launcher.Launcher;
 import dev.notchi.backend.live.EventDeduplicator;
 import dev.notchi.backend.live.LiveQueue;
+import dev.notchi.backend.notes.NoteClassifier;
+import dev.notchi.backend.notes.NotesStore;
 import dev.notchi.backend.stats.DurationStats;
 
 import java.io.IOException;
@@ -20,7 +26,7 @@ import java.util.concurrent.CountDownLatch;
  *
  * <pre>
  *   java -jar target/notchi-backend.jar              # keeps history in ~/Library/Application Support/Notchi/backend
- *   java -jar target/notchi-backend.jar --demo       # in-memory, preloaded with the sample durations
+ *   java -jar target/notchi-backend.jar --demo       # in-memory, with sample durations, screen time and notes
  *   java -jar target/notchi-backend.jar --port 7341 --data /tmp/notchi
  * </pre>
  */
@@ -58,10 +64,30 @@ public final class Main {
         LiveQueue live = new LiveQueue(new EventDeduplicator(10_000, 0.01, 24 * 3600 * 1000L),
                 System::currentTimeMillis);
 
-        ApiServer server = new NotchiApi(live, launcher, durations).register(new ApiServer());
+        NoteClassifier classifier = new NoteClassifier();
+        NotesStore notes = new NotesStore(classifier, demo ? null : data.resolve("notes.json"), System::currentTimeMillis);
+        ClipboardHistory clipboard = new ClipboardHistory(classifier, demo ? null : data.resolve("clipboard.json"),
+                System::currentTimeMillis);
+        ScreenTime screenTime = new ScreenTime(demo ? null : data.resolve("screen-time.csv"), System::currentTimeMillis);
+        Workspaces workspaces = new Workspaces(screenTime, demo ? null : data.resolve("workspaces-dismissed.json"));
+        if (demo) {
+            int tz = java.util.TimeZone.getDefault().getOffset(System.currentTimeMillis()) / 60_000;
+            DemoActivity.fill(screenTime, System.currentTimeMillis(), tz);
+            for (String n : List.of("netflix password: hunter2", "https://github.com/JustSid26/notchi",
+                    "remind me to submit the CIA3 report friday 5pm", "buy milk and eggs",
+                    "Rahul +91 98765 43210 rahul@example.com", "idea: a notch pet that reacts to music")) {
+                notes.create(n, tz);
+            }
+            System.out.println("Demo mode: sample screen time for the last 7 days and 6 sample notes.");
+        }
+
+        ApiServer server = new NotchiApi(live, launcher, durations, notes, clipboard, screenTime, workspaces)
+                .register(new ApiServer())
+                .requireToken(System.getenv("NOTCHI_TOKEN"));   // set by Notchi when it starts the backend
         server.start(port);
         System.out.println("Notchi backend " + NotchiApi.VERSION + " on http://127.0.0.1:" + server.port()
-                + (demo ? "" : "  (data: " + data + ")"));
+                + (demo ? "" : "  (data: " + data + ")")
+                + (System.getenv("NOTCHI_TOKEN") != null ? "  (token required)" : ""));
 
         CountDownLatch stop = new CountDownLatch(1);
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {

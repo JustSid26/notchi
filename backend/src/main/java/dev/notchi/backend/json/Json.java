@@ -291,6 +291,9 @@ public final class Json {
 
         public boolean has(String k) { return m.containsKey(k) && m.get(k) != null; }
 
+        /** The raw parsed value (String, Long, Double, Boolean, List, Map or null). */
+        public Object raw(String k) { return m.get(k); }
+
         public String string(String k) {
             Object v = m.get(k);
             if (v == null) throw new IllegalArgumentException("'" + k + "' is required");

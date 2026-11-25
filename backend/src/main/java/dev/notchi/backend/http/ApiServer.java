@@ -32,6 +32,7 @@ import java.util.regex.Pattern;
  *   malformed JSON, IllegalArgumentException  → 400
  *   NoSuchElementException, unknown route     → 404
  *   wrong method                              → 405
+ *   missing or wrong token (when one is set)   → 401
  *   request with an Origin or a foreign Host  → 403
  *   IllegalStateException                     → 409
  *   body over 2 MB                            → 413
@@ -85,6 +86,7 @@ public final class ApiServer {
     private record Route(String method, Pattern pattern, Handler handler) {}
 
     private final List<Route> routes = new ArrayList<>();
+    private byte[] token;
     private HttpServer server;
     private ExecutorService executor;
 
@@ -92,6 +94,17 @@ public final class ApiServer {
     public ApiServer route(String method, String path, Handler handler) {
         String regex = "^" + path.replaceAll("\\{[^/]+}", "([^/]+)") + "$";
         routes.add(new Route(method, Pattern.compile(regex), handler));
+        return this;
+    }
+
+    /**
+     * Requires every request except /api/health to carry {@code X-Notchi-Token: <token>}.
+     * Notchi starts the backend with a random token kept in the Keychain, so other programs on
+     * the Mac (including sandboxed apps that may only make network requests) can't read your
+     * notes or clipboard. Without a token (a backend you started by hand) nothing is required.
+     */
+    public ApiServer requireToken(String token) {
+        this.token = token == null || token.isBlank() ? null : token.getBytes(StandardCharsets.UTF_8);
         return this;
     }
 
@@ -121,6 +134,12 @@ public final class ApiServer {
         try {
             checkLocalClient(ex);
             String path = ex.getRequestURI().getRawPath();
+            if (token != null && !path.equals("/api/health")) {
+                String given = ex.getRequestHeaders().getFirst("X-Notchi-Token");
+                if (given == null || !java.security.MessageDigest.isEqual(token, given.getBytes(StandardCharsets.UTF_8))) {
+                    throw new HttpError(401, "missing or wrong X-Notchi-Token");
+                }
+            }
             String method = ex.getRequestMethod();
             Route match = null;
             List<String> params = List.of();

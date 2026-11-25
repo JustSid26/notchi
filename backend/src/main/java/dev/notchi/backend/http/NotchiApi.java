@@ -1,12 +1,16 @@
 package dev.notchi.backend.http;
 
+import dev.notchi.backend.activity.ScreenTime;
+import dev.notchi.backend.activity.Workspaces;
 import dev.notchi.backend.algo.bloom.BloomFilter;
 import dev.notchi.backend.algo.select.RandomizedSelect;
 import dev.notchi.backend.algo.select.SelectBaselines;
+import dev.notchi.backend.clipboard.ClipboardHistory;
 import dev.notchi.backend.json.Json;
 import dev.notchi.backend.launcher.Launcher;
 import dev.notchi.backend.live.LiveActivity;
 import dev.notchi.backend.live.LiveQueue;
+import dev.notchi.backend.notes.NotesStore;
 import dev.notchi.backend.stats.DurationStats;
 
 import java.util.ArrayList;
@@ -22,7 +26,10 @@ import java.util.Set;
  */
 public final class NotchiApi {
 
-    public static final String VERSION = "1.0.0";
+    public static final String VERSION = "1.1.0";
+    /** What this backend can do, so the app can tell an older one apart. */
+    public static final List<String> FEATURES = List.of("live", "launcher", "eta", "notes", "clipboard",
+            "activity", "workspaces");
     /** Different every time the backend starts, so the app can tell it restarted. */
     private static final String INSTANCE = Long.toString(System.currentTimeMillis(), 36)
             + Long.toString(System.nanoTime() & 0xffff, 36);
@@ -30,11 +37,20 @@ public final class NotchiApi {
     private final LiveQueue live;
     private final Launcher launcher;
     private final DurationStats durations;
+    private final NotesStore notes;
+    private final ClipboardHistory clipboard;
+    private final ScreenTime screenTime;
+    private final Workspaces workspaces;
 
-    public NotchiApi(LiveQueue live, Launcher launcher, DurationStats durations) {
+    public NotchiApi(LiveQueue live, Launcher launcher, DurationStats durations, NotesStore notes,
+                     ClipboardHistory clipboard, ScreenTime screenTime, Workspaces workspaces) {
         this.live = live;
         this.launcher = launcher;
         this.durations = durations;
+        this.notes = notes;
+        this.clipboard = clipboard;
+        this.screenTime = screenTime;
+        this.workspaces = workspaces;
     }
 
     public ApiServer register(ApiServer s) {
@@ -57,6 +73,72 @@ public final class NotchiApi {
         s.route("POST", "/api/durations/import", r -> Map.of("imported", durations.importCsv(lines(r.body()))));
         s.route("GET", "/api/durations/summary", r -> durations.summary(r.query("key")));
 
+        // Notes: sorted by an Aho–Corasick cue scan + structure; searched with a suffix array
+        s.route("POST", "/api/notes/classify", r -> {
+            Json.Fields f = r.fields();
+            return notes.classifier().classify(f.string("text"), System.currentTimeMillis(), tz(r, f)).toJson();
+        });
+        s.route("GET", "/api/notes", r -> Map.of(
+                "algorithm", "Aho–Corasick classification, suffix-array search",
+                "counts", notes.counts(),
+                "notes", notes.list(r.query("category"), r.query("q"), limit(r, 200, 1000)).stream()
+                        .map(NotesStore.Note::toJson).toList()));
+        s.route("POST", "/api/notes", r -> {
+            Json.Fields f = r.fields();
+            String text = f.string("text");
+            NotesStore.Note n = notes.create(f.optString("id"), text, tz(r, f));
+            Map<String, Object> m = new LinkedHashMap<>(n.toJson());
+            if (n.secret()) {
+                // Where the secrets were in the (trimmed) text, so the app can keep them in the
+                // macOS Keychain. Only in this response; never stored here.
+                List<List<Integer>> spans = new ArrayList<>();
+                for (int[] sp : notes.classifier().classify(text.strip(), System.currentTimeMillis(), 0).secretSpans()) {
+                    spans.add(List.of(sp[0], sp[1]));
+                }
+                m.put("secretSpans", spans);
+            }
+            return m;
+        });
+        s.route("GET", "/api/notes/due", r -> Map.of("notes", notes.due().stream().map(NotesStore.Note::toJson).toList()));
+        s.route("PATCH", "/api/notes/{id}", r -> {
+            Json.Fields f = r.fields();
+            return notes.update(r.param(0), bool(f, "done"), bool(f, "fired"), bool(f, "pinned"), f.optString("category")).toJson();
+        });
+        s.route("DELETE", "/api/notes/{id}", r -> Map.of("removed", notes.delete(r.param(0))));
+
+        // Clipboard history: suffix-array search; secrets are never stored
+        s.route("POST", "/api/clipboard", r -> {
+            Json.Fields f = r.fields();
+            ClipboardHistory.Result res = clipboard.add(f.string("text"), f.optString("source"));
+            Map<String, Object> m = new LinkedHashMap<>();
+            m.put("status", res.status().name().toLowerCase().replace('_', '-'));
+            if (res.clip() != null) m.put("clip", res.clip().toJson());
+            return m;
+        });
+        s.route("GET", "/api/clipboard", r -> Map.of(
+                "stats", clipboard.stats(),
+                "clips", clipboard.list(r.query("q"), limit(r, 100, ClipboardHistory.MAX_CLIPS)).stream()
+                        .map(ClipboardHistory.Clip::toJson).toList()));
+        s.route("PATCH", "/api/clipboard/{id}", r -> clipboard.pin(r.param(0), Boolean.TRUE.equals(bool(r.fields(), "pinned"))).toJson());
+        s.route("DELETE", "/api/clipboard/{id}", r -> Map.of("removed", clipboard.delete(r.param(0))));
+        s.route("DELETE", "/api/clipboard", r -> Map.of("removed", clipboard.clear("true".equals(r.query("all")))));
+
+        // Screen time (segment trees) and Workspaces (union–find)
+        s.route("POST", "/api/activity/spans", this::addSpans);
+        s.route("GET", "/api/activity/today", r -> screenTime.today(tz(r, null)));
+        s.route("GET", "/api/activity/range", r -> {
+            long from = longQuery(r, "from"), to = longQuery(r, "to");
+            return Map.of("seconds", screenTime.range(r.query("app"), from, to, tz(r, null)),
+                    "algorithm", "Segment tree range sum");
+        });
+        s.route("GET", "/api/workspaces", r -> workspaces.suggest(tz(r, null)));
+        s.route("POST", "/api/workspaces/dismiss", r -> {
+            List<String> apps = new ArrayList<>();
+            for (Object o : r.fields().list("apps")) apps.add(String.valueOf(o));
+            workspaces.dismiss(apps);
+            return Map.of("ok", true);
+        });
+
         // Lab: run an algorithm on your own data and compare it with its baseline
         s.route("POST", "/api/lab/select", this::labSelect);
         s.route("POST", "/api/lab/bloom", this::labBloom);
@@ -70,12 +152,17 @@ public final class NotchiApi {
         m.put("status", "ok");
         m.put("version", VERSION);
         m.put("instance", INSTANCE);
+        m.put("features", FEATURES);
         m.put("java", System.getProperty("java.version"));
         m.put("algorithms", List.of(
                 "Indexed binary heap (LIVE priority + expiry)",
                 "Bloom filter (duplicate event screening)",
                 "Trie (launcher prefix search)",
-                "Randomized Quickselect (Claude ETA percentiles)"));
+                "Randomized Quickselect (Claude ETA percentiles)",
+                "Aho–Corasick + KMP (note sorting)",
+                "Suffix array with radix sort (clipboard and note search)",
+                "Segment tree (screen time)",
+                "Union–find (workspaces)"));
         return m;
     }
 
@@ -84,7 +171,64 @@ public final class NotchiApi {
         m.put("live", live.stats());
         m.put("launcher", launcher.stats());
         m.put("durations", durations.stats());
+        m.put("notes", notes.counts());
+        m.put("clipboard", clipboard.stats());
+        m.put("screenTime", screenTime.stats());
+        m.put("workspaces", workspaces.stats());
         return m;
+    }
+
+    private Object addSpans(ApiServer.Request r) {
+        Json.Fields f = r.fields();
+        List<Object> raw = f.list("spans");
+        if (raw.size() > 1_000) throw new IllegalArgumentException("at most 1,000 spans per request");
+        List<ScreenTime.Span> spans = new ArrayList<>();
+        for (int i = 0; i < raw.size(); i++) {
+            if (!(raw.get(i) instanceof Map<?, ?> map)) throw new IllegalArgumentException("spans[" + i + "] must be an object");
+            @SuppressWarnings("unchecked")
+            Json.Fields sp = new Json.Fields((Map<String, Object>) map);
+            try {
+                spans.add(new ScreenTime.Span(sp.string("app"), sp.string("name"),
+                        whole(sp.number("start"), "start"), whole(sp.number("end"), "end")));
+            } catch (IllegalArgumentException e) {
+                throw new IllegalArgumentException("spans[" + i + "]: " + e.getMessage());
+            }
+        }
+        return Map.of("addedSeconds", screenTime.add(spans, tz(r, f)));
+    }
+
+    /** UTC offset in minutes from the body ("tz") or the query (?tz=), default 0. */
+    private static int tz(ApiServer.Request r, Json.Fields body) {
+        if (body != null && body.has("tz")) return (int) whole(body.number("tz"), "tz");
+        return r.intQuery("tz", 0);
+    }
+
+    private static int limit(ApiServer.Request r, int fallback, int max) {
+        int k = r.intQuery("limit", fallback);
+        if (k < 1 || k > max) throw new IllegalArgumentException("'limit' must be between 1 and " + max);
+        return k;
+    }
+
+    private static long longQuery(ApiServer.Request r, String name) {
+        String v = r.query(name);
+        if (v == null) throw new IllegalArgumentException("'" + name + "' is required");
+        try {
+            return Long.parseLong(v);
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException("'" + name + "' must be epoch milliseconds");
+        }
+    }
+
+    private static long whole(double v, String name) {
+        if (v != Math.rint(v) || Math.abs(v) > 9e15) throw new IllegalArgumentException("'" + name + "' must be a whole number");
+        return (long) v;
+    }
+
+    private static Boolean bool(Json.Fields f, String k) {
+        if (!f.has(k)) return null;
+        Object v = f.raw(k);
+        if (!(v instanceof Boolean b)) throw new IllegalArgumentException("'" + k + "' must be true or false");
+        return b;
     }
 
     private Object pushEvent(ApiServer.Request r) {

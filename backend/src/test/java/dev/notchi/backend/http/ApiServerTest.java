@@ -1,6 +1,11 @@
 package dev.notchi.backend.http;
 
+import dev.notchi.backend.activity.ScreenTime;
+import dev.notchi.backend.activity.Workspaces;
+import dev.notchi.backend.clipboard.ClipboardHistory;
 import dev.notchi.backend.json.Json;
+import dev.notchi.backend.notes.NoteClassifier;
+import dev.notchi.backend.notes.NotesStore;
 import dev.notchi.backend.launcher.Launcher;
 import dev.notchi.backend.live.EventDeduplicator;
 import dev.notchi.backend.live.LiveQueue;
@@ -29,7 +34,12 @@ class ApiServerTest {
     @BeforeEach
     void start() throws Exception {
         LiveQueue live = new LiveQueue(new EventDeduplicator(1_000, 0.01, 60_000), System::currentTimeMillis);
-        server = new NotchiApi(live, new Launcher(null), new DurationStats(null, new Random(1)))
+        NoteClassifier classifier = new NoteClassifier();
+        ScreenTime screenTime = new ScreenTime(null, System::currentTimeMillis);
+        server = new NotchiApi(live, new Launcher(null), new DurationStats(null, new Random(1)),
+                new NotesStore(classifier, null, System::currentTimeMillis),
+                new ClipboardHistory(classifier, null, System::currentTimeMillis),
+                screenTime, new Workspaces(screenTime, null))
                 .register(new ApiServer());
         server.start(0);
     }
@@ -47,12 +57,34 @@ class ApiServerTest {
     }
 
     @Test
-    @DisplayName("health lists the four algorithms")
+    @DisplayName("with a token set, every endpoint but health needs it")
+    void token() throws Exception {
+        server.stop();
+        LiveQueue live = new LiveQueue(new EventDeduplicator(1_000, 0.01, 60_000), System::currentTimeMillis);
+        NoteClassifier classifier = new NoteClassifier();
+        ScreenTime st = new ScreenTime(null, System::currentTimeMillis);
+        server = new NotchiApi(live, new Launcher(null), new DurationStats(null, new Random(1)),
+                new NotesStore(classifier, null, System::currentTimeMillis),
+                new ClipboardHistory(classifier, null, System::currentTimeMillis), st, new Workspaces(st, null))
+                .register(new ApiServer()).requireToken("s3cret-token");
+        server.start(0);
+        assertEquals(200, call("GET", "/api/health", null).status);
+        assertEquals(401, call("GET", "/api/clipboard", null).status);
+        HttpRequest ok = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + server.port() + "/api/clipboard"))
+                .header("X-Notchi-Token", "s3cret-token").GET().build();
+        assertEquals(200, http.send(ok, HttpResponse.BodyHandlers.ofString()).statusCode());
+        HttpRequest wrong = HttpRequest.newBuilder(URI.create("http://127.0.0.1:" + server.port() + "/api/clipboard"))
+                .header("X-Notchi-Token", "guess").GET().build();
+        assertEquals(401, http.send(wrong, HttpResponse.BodyHandlers.ofString()).statusCode());
+    }
+
+    @Test
+    @DisplayName("health lists the eight algorithms")
     void health() throws Exception {
         Res r = call("GET", "/api/health", null);
         assertEquals(200, r.status);
         assertEquals("ok", r.body.get("status"));
-        assertEquals(4, ((List<?>) r.body.get("algorithms")).size());
+        assertEquals(8, ((List<?>) r.body.get("algorithms")).size());
     }
 
     @Test
@@ -137,5 +169,33 @@ class ApiServerTest {
                 "{\"expected\":100,\"fpp\":0.01,\"inserts\":[\"a\",\"b\"],\"queries\":[\"a\",\"zzz\"]}");
         assertEquals(7L, bloom.body.get("hashes"));
         assertEquals(400, call("POST", "/api/lab/select", "{\"values\":[]}").status);
+    }
+
+    @Test
+    @DisplayName("notes, clipboard, screen time and workspaces over HTTP")
+    void newFeatures() throws Exception {
+        Res cls = call("POST", "/api/notes/classify", "{\"text\":\"wifi password: Blue#Sky22\",\"tz\":330}");
+        assertEquals("credential", cls.body.get("category"));
+        Res note = call("POST", "/api/notes", "{\"text\":\"wifi password: Blue#Sky22\",\"tz\":330}");
+        assertEquals(true, note.body.get("secret"));
+        assertFalse(((String) note.body.get("text")).contains("Blue#Sky"));
+        call("POST", "/api/notes", "{\"text\":\"buy milk tomorrow\"}");
+        Res list = call("GET", "/api/notes?q=milk", null);
+        assertEquals(1, ((List<?>) list.body.get("notes")).size());
+        String id = (String) note.body.get("id");
+        assertEquals(true, call("PATCH", "/api/notes/" + id, "{\"pinned\":true}").body.get("pinned"));
+        assertEquals(400, call("PATCH", "/api/notes/" + id, "{\"pinned\":\"yes\"}").status);
+
+        assertEquals("added", call("POST", "/api/clipboard", "{\"text\":\"https://example.com/a\"}").body.get("status"));
+        assertEquals("skipped-secret", call("POST", "/api/clipboard", "{\"text\":\"token: ghp_8f2KxQ1zP0aBcD9eF7gH3iJ5kL\"}").body.get("status"));
+        assertEquals(1, ((List<?>) call("GET", "/api/clipboard?q=EXAMPLE", null).body.get("clips")).size());
+
+        long now = System.currentTimeMillis();
+        Res spans = call("POST", "/api/activity/spans", "{\"tz\":0,\"spans\":[{\"app\":\"com.figma.Desktop\",\"name\":\"Figma\",\"start\":"
+                + (now - 600_000) + ",\"end\":" + (now - 60_000) + "}]}");
+        assertEquals(200, spans.status);
+        assertTrue(((Number) call("GET", "/api/activity/today?tz=0", null).body.get("totalSeconds")).longValue() >= 500);
+        assertEquals(200, call("GET", "/api/workspaces?tz=0", null).status);
+        assertEquals(400, call("POST", "/api/activity/spans", "{\"spans\":[{\"app\":\"x\",\"name\":\"X\",\"start\":5,\"end\":1}]}").status);
     }
 }
