@@ -12,9 +12,9 @@ Workload: n activities, then 100 rounds of *update one random activity + read th
 
 | n | heap (ms) | re-sort (ms) | speed-up |
 |---:|---:|---:|---:|
-| 1000 | 0.232 | 6.85 | 29× |
-| 10000 | 0.154 | 120 | 777× |
-| 100000 | 0.157 | 1862 | 11839× |
+| 1000 | 0.133 | 8.72 | 66× |
+| 10000 | 0.144 | 104 | 719× |
+| 100000 | 0.167 | 1591 | 9530× |
 
 Per round the heap does O(log n) for the update and O(k log k) for the top 10; re-sorting is O(n log n). The gap grows with n, as expected.
 
@@ -24,15 +24,15 @@ Catalog of n synthetic app/command names (1–3 words from a 400-word vocabulary
 
 | n | prefix | trie (µs/query) | scan (µs/query) | speed-up | trie nodes |
 |---:|---:|---:|---:|---:|---:|
-| 1000 | 1 | 11.94 | 13.41 | 1.1× | 9715 |
-| 1000 | 2 | 1.28 | 10.59 | 8.3× | 9715 |
-| 1000 | 4 | 1.02 | 7.99 | 7.9× | 9715 |
-| 10000 | 1 | 53.95 | 215 | 4.0× | 72808 |
-| 10000 | 2 | 6.88 | 111 | 16× | 72808 |
-| 10000 | 4 | 5.04 | 115 | 23× | 72808 |
-| 100000 | 1 | 850 | 5130 | 6.0× | 550145 |
-| 100000 | 2 | 65.24 | 2805 | 43× | 550145 |
-| 100000 | 4 | 44.74 | 2832 | 63× | 550145 |
+| 1000 | 1 | 19.75 | 13.33 | 0.7× | 9715 |
+| 1000 | 2 | 1.43 | 41.36 | 29× | 9715 |
+| 1000 | 4 | 0.913 | 7.86 | 8.6× | 9715 |
+| 10000 | 1 | 56.94 | 234 | 4.1× | 72808 |
+| 10000 | 2 | 7.31 | 126 | 17× | 72808 |
+| 10000 | 4 | 5.62 | 132 | 24× | 72808 |
+| 100000 | 1 | 754 | 5634 | 7.5× | 550145 |
+| 100000 | 2 | 84.88 | 3542 | 42× | 550145 |
+| 100000 | 4 | 55.15 | 3639 | 66× | 550145 |
 
 The trie only visits the subtree under the prefix, so longer prefixes (smaller subtrees) are fastest. A one-letter prefix still touches ~1/26 of the catalog; the scan always touches all of it.
 
@@ -42,9 +42,9 @@ n distinct event ids are inserted (filter sized for n at 1%), then n *new* ids a
 
 | n | Bloom memory | HashSet memory | ratio | target FPR | expected FPR | observed FPR | Bloom ns/lookup | HashSet ns/lookup |
 |---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 10000 | 11.7 KB | 611.0 KB | 52× smaller | 1.00% | 1.00% | 0.83% | 122 | 50.94 |
-| 100000 | 117.0 KB | 7.3 MB | 64× smaller | 1.00% | 1.00% | 1.00% | 54.07 | 5.39 |
-| 1000000 | 1.1 MB | 63.5 MB | 56× smaller | 1.00% | 1.00% | 1.01% | 51.95 | 9.51 |
+| 10000 | 11.7 KB | 611.0 KB | 52× smaller | 1.00% | 1.00% | 0.83% | 155 | 50.74 |
+| 100000 | 117.0 KB | 7.3 MB | 64× smaller | 1.00% | 1.00% | 1.00% | 52.64 | 5.40 |
+| 1000000 | 1.1 MB | 63.5 MB | 56× smaller | 1.00% | 1.00% | 1.01% | 47.29 | 8.33 |
 
 The filter needs ~1.2 bytes per id regardless of id length, at the cost of ~1% "possibly seen" answers, which Notchi confirms against the exact log. In memory a HashSet lookup is faster (a String caches its hash code, while the filter hashes the bytes and probes k bits), so the filter does not win on speed here. Its wins are memory (~50× smaller) and that the authoritative log, which in a real deployment lives in a database or on disk, is skipped for the ~99% of events that are new.
 
@@ -54,9 +54,9 @@ n log-normal durations (like real run times). Find the median. Baseline: sort a 
 
 | n | quickselect (ms) | sort (ms) | speed-up | comparisons / n (mean of 25 seeds) |
 |---:|---:|---:|---:|---:|
-| 10000 | 0.115 | 0.537 | 4.7× | 5.58 |
-| 100000 | 0.440 | 4.08 | 9.3× | 4.91 |
-| 1000000 | 8.06 | 49.62 | 6.2× | 5.34 |
+| 10000 | 0.107 | 0.487 | 4.5× | 5.58 |
+| 100000 | 0.420 | 3.94 | 9.4× | 4.91 |
+| 1000000 | 8.05 | 49.08 | 6.1× | 5.34 |
 
 Comparisons per element stay roughly flat as n grows, which is what linear expected time looks like (the three-way partition counts up to two comparisons per element per pass). Sorting does Θ(n log n) work to answer a question that only needs one rank.
 
@@ -66,8 +66,56 @@ The same median search on sorted data (e.g. durations logged in increasing order
 
 | n | randomized (ms) | first pivot (ms) | randomized comparisons | first-pivot comparisons |
 |---:|---:|---:|---:|---:|
-| 2000 | 0.009 | 0.461 | 14180 | 1500499 |
-| 8000 | 0.019 | 2.86 | 26898 | 24001999 |
-| 32000 | 0.073 | 45.56 | 124028 | 384007999 |
+| 2000 | 0.008 | 0.720 | 14180 | 1500499 |
+| 8000 | 0.017 | 2.83 | 26898 | 24001999 |
+| 32000 | 0.084 | 45.91 | 124028 | 384007999 |
 
 To reach the median the first-element pivot peels off one element per pass: about 3n²/8 comparisons (quadratic: 4× the size → ~16× the work); the random pivot stays linear on every input, because no input can make it pick badly on purpose.
+
+## 5. Note sorting: Aho–Corasick vs running KMP once per cue word
+
+k cue words (random 3–8 letter words), one 10,000-character note. Find every occurrence of every cue. Baseline: KMP for each cue in turn. Automaton build time is shown separately (done once at start-up).
+
+| cue words k | Aho–Corasick (ms) | KMP × k (ms) | speed-up | build (ms) | matches |
+|---:|---:|---:|---:|---:|---:|
+| 100 | 0.363 | 1.43 | 3.9× | 0.300 | 5 |
+| 1000 | 0.296 | 14.30 | 48× | 1.56 | 50 |
+| 10000 | 0.207 | 142 | 687× | 5.80 | 514 |
+
+One pass over the note finds every cue, so the time hardly depends on how many cue words there are (O(n + matches)); KMP per word re-reads the note k times (O(k·n)). Notchi's sorter has ~150 cues.
+
+## 6. Clipboard / note search: suffix array vs scanning every clip
+
+n clips of ~80 characters (random words). 500 queries, each a 3–6 character piece of a random clip, matched anywhere in the text. Baseline: KMP over every clip for each query.
+
+| clips n | characters | build (ms) | suffix array (µs/query) | scan (µs/query) | speed-up |
+|---:|---:|---:|---:|---:|---:|
+| 500 | 40222 | 2.90 | 1.06 | 69.68 | 66× |
+| 5000 | 402968 | 15.89 | 8.58 | 693 | 81× |
+| 50000 | 4026822 | 268 | 125 | 6932 | 55× |
+
+After an O(N log N) build, each query is two binary searches (O(m log N)) plus the matches; the scan reads all N characters every time. The index is rebuilt only after the history changes, and only when someone searches.
+
+## 7. Screen time: segment tree vs a plain array vs prefix sums
+
+n minute buckets; 20,000 operations, half "add seconds to a minute" (what tracking does) and half "total over a random range" (what the Activity page asks). Plain array: O(1) update, O(r−l) query. Prefix sums: O(1) query, O(n) update.
+
+| minutes n | segment tree (ms) | plain array (ms) | prefix sums (ms) |
+|---:|---:|---:|---:|
+| 1440 | 0.615 | 1.09 | 3.91 |
+| 43200 | 0.833 | 34.13 | 121 |
+| 1000000 | 3.30 | 806 | 3195 (extrapolated) |
+
+Both operations are O(log n) in the tree, so it stays fast for a day (1,440), a month (43,200) and a million buckets. Each simple structure is fast at one operation and linear at the other.
+
+## 8. Workspaces: union–find vs recomputing groups with BFS
+
+n apps, n random "used together" links added one at a time, and 1,000 "are these two in the same workspace?" questions spread between them. Baseline: rebuild the groups with BFS before each question.
+
+| apps n | union–find (ms) | BFS recompute (ms) | speed-up | groups at the end |
+|---:|---:|---:|---:|---:|
+| 1000 | 0.059 | 3.27 | 56× | 163 |
+| 10000 | 0.275 | 57.62 | 210× | 1588 |
+| 100000 | 1.50 | 1149 | 766× | 16170 |
+
+Each union and find costs O(α(n)), effectively constant, so union–find answers as links arrive. BFS costs O(n + e) per rebuild. In Notchi the app graph is small, so the win there is simplicity and correctness; the scaling shows at larger n.

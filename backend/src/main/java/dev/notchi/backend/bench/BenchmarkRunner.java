@@ -1,6 +1,11 @@
 package dev.notchi.backend.bench;
 
 import dev.notchi.backend.algo.bloom.BloomFilter;
+import dev.notchi.backend.algo.dsu.DisjointSet;
+import dev.notchi.backend.algo.text.AhoCorasick;
+import dev.notchi.backend.algo.text.Kmp;
+import dev.notchi.backend.algo.text.SuffixIndex;
+import dev.notchi.backend.algo.tree.SegmentTree;
 import dev.notchi.backend.algo.heap.IndexedBinaryHeap;
 import dev.notchi.backend.algo.select.RandomizedSelect;
 import dev.notchi.backend.algo.select.SelectBaselines;
@@ -48,6 +53,10 @@ public final class BenchmarkRunner {
         b.launcher();
         b.bloom();
         b.select();
+        b.ahoCorasick();
+        b.suffixArray();
+        b.segmentTree();
+        b.unionFind();
         Files.createDirectories(out);
         Files.writeString(out.resolve("benchmarks.md"), b.md.toString(), StandardCharsets.UTF_8);
         Files.write(out.resolve("benchmarks.csv"), b.csv, StandardCharsets.UTF_8);
@@ -330,6 +339,225 @@ public final class BenchmarkRunner {
         note("To reach the median the first-element pivot peels off one element per pass: about 3n²/8 comparisons "
                 + "(quadratic: 4× the size → ~16× the work); "
                 + "the random pivot stays linear on every input, because no input can make it pick badly on purpose.");
+    }
+
+    // ---- 5. Note sorting: Aho–Corasick vs KMP once per cue word ------------------------------------
+
+    void ahoCorasick() {
+        section("5. Note sorting: Aho–Corasick vs running KMP once per cue word",
+                "k cue words (random 3–8 letter words), one 10,000-character note. Find every occurrence of every "
+                + "cue. Baseline: KMP for each cue in turn. Automaton build time is shown separately (done once at start-up).");
+        table("| cue words k | Aho–Corasick (ms) | KMP × k (ms) | speed-up | build (ms) | matches |", "|---:|---:|---:|---:|---:|---:|");
+        Random r = new Random(17);
+        String text = randomText(r, 10_000, vocabulary(2_000, new Random(23)));
+        for (int k : new int[]{100, 1_000, 10_000}) {
+            String[] words = vocabulary(k, new Random(k));
+            long[] matches = new long[1];
+            double build = median(() -> {
+                long t0 = System.nanoTime();
+                AhoCorasick<Integer> ac = new AhoCorasick<>();
+                for (String w : words) ac.add(w, 1);
+                ac.build();
+                return System.nanoTime() - t0;
+            });
+            AhoCorasick<Integer> ac = new AhoCorasick<>();
+            for (String w : words) ac.add(w, 1);
+            ac.build();
+            double fast = median(() -> {
+                long t0 = System.nanoTime();
+                matches[0] = ac.findAll(text).size();
+                return System.nanoTime() - t0;
+            });
+            double slow = median(() -> {
+                long t0 = System.nanoTime(), sink = 0;
+                for (String w : words) sink += Kmp.findAll(text, w).size();
+                return System.nanoTime() - t0 + (sink == -1 ? 1 : 0);
+            });
+            row(k, fmt(fast), fmt(slow), speedup(slow / fast), fmt(build), matches[0]);
+            csv("aho-corasick", k, "automaton", fast, "matches=" + matches[0]);
+            csv("aho-corasick", k, "kmp-per-pattern", slow, "");
+        }
+        note("One pass over the note finds every cue, so the time hardly depends on how many cue words there are "
+                + "(O(n + matches)); KMP per word re-reads the note k times (O(k·n)). Notchi's sorter has ~150 cues.");
+    }
+
+    private static String randomText(Random r, int len, String[] words) {
+        StringBuilder b = new StringBuilder();
+        while (b.length() < len) b.append(words[r.nextInt(words.length)]).append(' ');
+        return b.substring(0, len);
+    }
+
+    // ---- 6. Clipboard search: suffix array vs scanning every clip --------------------------------
+
+    void suffixArray() {
+        section("6. Clipboard / note search: suffix array vs scanning every clip",
+                "n clips of ~80 characters (random words). 500 queries, each a 3–6 character piece of a random clip, "
+                + "matched anywhere in the text. Baseline: KMP over every clip for each query.");
+        table("| clips n | characters | build (ms) | suffix array (µs/query) | scan (µs/query) | speed-up |",
+                "|---:|---:|---:|---:|---:|---:|");
+        String[] vocab = vocabulary(400, new Random(31));
+        for (int n : new int[]{500, 5_000, 50_000}) {
+            Random r = new Random(n);
+            List<String> clips = new ArrayList<>(n);
+            for (int i = 0; i < n; i++) clips.add(randomText(r, 60 + r.nextInt(40), vocab));
+            String[] queries = new String[500];
+            for (int i = 0; i < queries.length; i++) {
+                String c = clips.get(r.nextInt(n));
+                int len = 3 + r.nextInt(4), at = r.nextInt(Math.max(1, c.length() - len));
+                queries[i] = c.substring(at, at + len).toLowerCase();
+            }
+            double build = median(() -> {
+                long t0 = System.nanoTime();
+                new SuffixIndex(clips);
+                return System.nanoTime() - t0;
+            });
+            SuffixIndex idx = new SuffixIndex(clips);
+            List<String> lower = clips.stream().map(String::toLowerCase).toList();
+            double sa = median(() -> {
+                long t0 = System.nanoTime(), sink = 0;
+                for (String q : queries) sink += idx.search(q, Integer.MAX_VALUE).size();
+                return System.nanoTime() - t0 + (sink == -1 ? 1 : 0);
+            }) * 1000 / queries.length;
+            double scan = median(() -> {
+                long t0 = System.nanoTime(), sink = 0;
+                for (String q : queries) for (String c : lower) if (Kmp.contains(c, q)) sink++;
+                return System.nanoTime() - t0 + (sink == -1 ? 1 : 0);
+            }) * 1000 / queries.length;
+            row(n, idx.length(), fmt(build), fmt(sa), fmt(scan), speedup(scan / sa));
+            csv("suffix-array", n, "query", sa / 1000, "build_ms=" + build);
+            csv("suffix-array", n, "scan", scan / 1000, "");
+        }
+        note("After an O(N log N) build, each query is two binary searches (O(m log N)) plus the matches; the scan "
+                + "reads all N characters every time. The index is rebuilt only after the history changes, and only "
+                + "when someone searches.");
+    }
+
+    // ---- 7. Screen time: segment tree vs plain array vs prefix sums ------------------------------
+
+    void segmentTree() {
+        section("7. Screen time: segment tree vs a plain array vs prefix sums",
+                "n minute buckets; 20,000 operations, half \"add seconds to a minute\" (what tracking does) and half "
+                + "\"total over a random range\" (what the Activity page asks). Plain array: O(1) update, O(r−l) query. "
+                + "Prefix sums: O(1) query, O(n) update.");
+        table("| minutes n | segment tree (ms) | plain array (ms) | prefix sums (ms) |", "|---:|---:|---:|---:|");
+        for (int n : new int[]{1_440, 43_200, 1_000_000}) {
+            Random seed = new Random(n);
+            int ops = 20_000;
+            int[] kind = new int[ops], a = new int[ops], b = new int[ops];
+            for (int i = 0; i < ops; i++) {
+                kind[i] = seed.nextInt(2);
+                int x = seed.nextInt(n), y = seed.nextInt(n);
+                a[i] = Math.min(x, y);
+                b[i] = Math.max(x, y) + 1;
+            }
+            double tree = median(() -> {
+                SegmentTree t = new SegmentTree(n);
+                long t0 = System.nanoTime(), sink = 0;
+                for (int i = 0; i < ops; i++) {
+                    if (kind[i] == 0) t.add(a[i], 30); else sink += t.sum(a[i], b[i]);
+                }
+                return System.nanoTime() - t0 + (sink == -1 ? 1 : 0);
+            });
+            double plain = median(() -> {
+                long[] arr = new long[n];
+                long t0 = System.nanoTime(), sink = 0;
+                for (int i = 0; i < ops; i++) {
+                    if (kind[i] == 0) arr[a[i]] += 30;
+                    else for (int j = a[i]; j < b[i]; j++) sink += arr[j];
+                }
+                return System.nanoTime() - t0 + (sink == -1 ? 1 : 0);
+            });
+            // Prefix sums rebuild on every update: cap the work so n = 1,000,000 finishes.
+            int prefixOps = n >= 1_000_000 ? 2_000 : ops;
+            double prefix = median(() -> {
+                long[] arr = new long[n], pre = new long[n + 1];
+                long t0 = System.nanoTime(), sink = 0;
+                for (int i = 0; i < prefixOps; i++) {
+                    if (kind[i] == 0) {
+                        arr[a[i]] += 30;
+                        for (int j = a[i]; j < n; j++) pre[j + 1] = pre[j] + arr[j];
+                    } else {
+                        sink += pre[b[i]] - pre[a[i]];
+                    }
+                }
+                return System.nanoTime() - t0 + (sink == -1 ? 1 : 0);
+            }) * ops / prefixOps;
+            row(n, fmt(tree), fmt(plain), fmt(prefix) + (prefixOps < ops ? " (extrapolated)" : ""));
+            csv("segment-tree", n, "segment-tree", tree, "");
+            csv("segment-tree", n, "plain-array", plain, "");
+            csv("segment-tree", n, "prefix-sums", prefix, prefixOps < ops ? "extrapolated" : "");
+        }
+        note("Both operations are O(log n) in the tree, so it stays fast for a day (1,440), a month (43,200) and a million "
+                + "buckets. Each simple structure is fast at one operation and linear at the other.");
+    }
+
+    // ---- 8. Workspaces: union–find vs recomputing components with BFS ---------------------------
+
+    void unionFind() {
+        section("8. Workspaces: union–find vs recomputing groups with BFS",
+                "n apps, n random \"used together\" links added one at a time, and 1,000 \"are these two in the same "
+                + "workspace?\" questions spread between them. Baseline: rebuild the groups with BFS before each question.");
+        table("| apps n | union–find (ms) | BFS recompute (ms) | speed-up | groups at the end |", "|---:|---:|---:|---:|---:|");
+        for (int n : new int[]{1_000, 10_000, 100_000}) {
+            Random r = new Random(n);
+            int[] ea = new int[n], eb = new int[n];
+            for (int i = 0; i < n; i++) { ea[i] = r.nextInt(n); eb[i] = r.nextInt(n); }
+            int questions = 1_000, every = Math.max(1, n / questions);
+            int[] qa = new int[questions], qb = new int[questions];
+            for (int i = 0; i < questions; i++) { qa[i] = r.nextInt(n); qb[i] = r.nextInt(n); }
+            long[] groups = new long[1];
+            double dsu = median(() -> {
+                DisjointSet d = new DisjointSet(n);
+                long t0 = System.nanoTime(), sink = 0;
+                int q = 0;
+                for (int i = 0; i < n; i++) {
+                    d.union(ea[i], eb[i]);
+                    if ((i + 1) % every == 0 && q < questions) { if (d.connected(qa[q], qb[q])) sink++; q++; }
+                }
+                groups[0] = d.components();
+                return System.nanoTime() - t0 + (sink == -1 ? 1 : 0);
+            });
+            double bfs = median(() -> {
+                List<List<Integer>> adj = new ArrayList<>(n);
+                for (int i = 0; i < n; i++) adj.add(new ArrayList<>());
+                int[] comp = new int[n];
+                long t0 = System.nanoTime(), sink = 0;
+                int q = 0;
+                for (int i = 0; i < n; i++) {
+                    adj.get(ea[i]).add(eb[i]);
+                    adj.get(eb[i]).add(ea[i]);
+                    if ((i + 1) % every == 0 && q < questions) {
+                        bfsComponents(adj, comp);
+                        if (comp[qa[q]] == comp[qb[q]]) sink++;
+                        q++;
+                    }
+                }
+                return System.nanoTime() - t0 + (sink == -1 ? 1 : 0);
+            });
+            row(n, fmt(dsu), fmt(bfs), speedup(bfs / dsu), groups[0]);
+            csv("union-find", n, "dsu", dsu, "groups=" + groups[0]);
+            csv("union-find", n, "bfs", bfs, "");
+        }
+        note("Each union and find costs O(α(n)), effectively constant, so union–find answers as links arrive. BFS costs "
+                + "O(n + e) per rebuild. In Notchi the app graph is small, so the win there is simplicity and correctness; "
+                + "the scaling shows at larger n.");
+    }
+
+    private static void bfsComponents(List<List<Integer>> adj, int[] comp) {
+        java.util.Arrays.fill(comp, -1);
+        int c = 0;
+        int[] queue = new int[adj.size()];
+        for (int s = 0; s < adj.size(); s++) {
+            if (comp[s] != -1) continue;
+            int head = 0, tail = 0;
+            queue[tail++] = s;
+            comp[s] = c;
+            while (head < tail) {
+                int u = queue[head++];
+                for (int v : adj.get(u)) if (comp[v] == -1) { comp[v] = c; queue[tail++] = v; }
+            }
+            c++;
+        }
     }
 
     // ---- reporting helpers ----------------------------------------------------------------------
