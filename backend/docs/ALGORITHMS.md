@@ -11,7 +11,7 @@ Each section covers:
 - how failures are handled
 - which tests check it
 
-Measured numbers are in [benchmarks.md](benchmarks.md).
+Measured numbers are in [benchmarks.md](benchmarks.md). Sections 1–4 serve the LIVE queue, launcher and Claude ETA. Sections 5–8 serve Notes, Clipboard history, Screen time and Workspaces.
 
 ---
 
@@ -301,8 +301,242 @@ A CSV import is all-or-nothing, and reports the line number of the first bad lin
 
 ---
 
+## 5. Aho–Corasick: sorting notes (Unit 4 · CO3)
+
+**Code:** `algo/text/AhoCorasick.java` (KMP baseline in `algo/text/Kmp.java`), used by `notes/NoteClassifier.java`.
+
+**Problem.** A note or a copied clip has to be filed as a reminder, to-do, link, password/key, contact, code, idea or plain note. Evidence comes from about 150 cue words and phrases ("password", "remind", "don't forget", "buy", "def ", "what if"…). Searching for each one separately re-reads the text 150 times.
+
+**Inputs.**
+- Text up to 20,000 characters.
+- `now` and the user's UTC offset, to resolve "tomorrow 5pm".
+
+**Output.** A category, a confidence (top score ÷ total), human-readable reasons, extracted links/e-mails/phones, a due time, and the secret spans to hide.
+
+**The automaton.** A trie of all cue words. Each node also gets:
+- a **failure link:** the longest proper suffix of the node's string that is also in the trie. This is KMP's prefix function, generalised from one pattern to many.
+- an **output link:** the nearest node on the failure chain where a cue ends.
+
+```
+build:  BFS from the root
+          for each edge u –c→ v:
+            f = fail[u]
+            while f ≠ root and f has no c-child: f = fail[f]
+            fail[v] = f's c-child (or root)
+            out[v]  = fail[v] if a cue ends there, else out[fail[v]]
+search: state = root
+        for each character c:
+          while state ≠ root and state has no c-child: state = fail[state]
+          state = child(state, c) or root
+          report the cues ending at state, then follow output links
+```
+
+**Scoring.** One token scan adds structural evidence:
+- links: http(s)://, www., or a domain with a known TLD;
+- e-mails;
+- phone numbers: whole tokens with 10–15 digits;
+- secrets:
+  - known key prefixes such as `ghp_` or `sk-…`;
+  - long, mixed-case, high-entropy tokens (UUIDs, hex hashes, paths and file names are excluded);
+  - a note that is just one password-shaped token, like `Tr0ub4dor&3`;
+  - the value after "password:", "password for netflix:" or "password is", hidden to the end of the line, so passphrases are hidden whole;
+  - the password in `user:pass@host`, and credential-looking query values in URLs (`?access_token=…`);
+  - private-key blocks;
+- a due time ("in 20 min", "tomorrow at 5pm", "friday 9:30am", "tonight"…);
+- code punctuation.
+
+Cue words count once each and must be whole words where it matters. "pass" doesn't fire inside "passport".
+
+The category with the highest score wins, and ties go to the earlier category in the list. Credential words without an actual secret are down-weighted (×0.4), so "the secret to good coffee" stays a note. Links, e-mails and phone numbers that fall inside a secret are dropped from the result, so nothing secret reaches the stored reasons or URLs.
+
+A few rules keep due times sensible:
+- A dot only makes a time with am/pm or after "at" ("2.49" is a price).
+- Hours 1–7 without am/pm mean the afternoon ("at 5:30" is 17:30).
+- A weekday includes today if the time is still ahead.
+- "today" with no time, said late in the day, means an hour from now rather than the past.
+
+**Correctness.** Every occurrence of a cue ending at position i corresponds to a suffix of the text up to i that is a trie path. After reading character i, the automaton is at the longest such suffix: the same invariant as KMP, proved the same way by induction on i. All shorter cues ending at i are on its failure chain, and the output links visit exactly those that end a cue. The test compares against KMP run per pattern on 300 random texts × 40 random patterns.
+
+**Cost.**
+- Build: O(L) for L total cue length (once, at start-up).
+- Search: O(n + z) for n characters and z matches, independent of the number of cues.
+- Baseline (KMP per cue): O(k · n).
+- Measured: 687× faster at k = 10,000.
+
+**Failure handling.**
+- Over-long text → 400.
+- Secrets are redacted before a note is stored (the original goes to the macOS Keychain, from the app).
+- A clip with a secret is not stored at all.
+- A wrong guess can be corrected (**Move to**), and the user's choice is kept.
+
+**Tests:**
+- `AhoCorasickTest`, 6 tests: edges; the classic he/she/his/hers example; overlapping patterns; case and payloads; random texts against KMP; the KMP prefix function.
+- `NoteClassifierTest`, 8 tests:
+  - credentials and redaction;
+  - passphrases, "is", URLs and lone passwords, with nothing leaking into reasons or URLs;
+  - no false credentials (UUIDs, file names, "pin the tab", "password manager");
+  - due times, including prices and versions that aren't times, afternoon hours, today's weekday, and "9 am already passed → tomorrow";
+  - "today" said late in the day;
+  - the other categories;
+  - boundaries;
+  - reasons and whole-word matching.
+- `NotesStoreTest`, 5 tests: secrets never stored or searchable; search, filter and pinning; due reminders fire once; a client-chosen id, and filing by hand under Passwords hides the text; persistence and validation.
+
+---
+
+## 6. Suffix array: clipboard and note search (Units 4 + 1 · CO3)
+
+**Code:** `algo/text/SuffixIndex.java`, used by `clipboard/ClipboardHistory.java` and `notes/NotesStore.java`.
+
+**Problem.** "Where was that link I copied yesterday?" Search must find text *anywhere* inside a clip, not just at the start of a word (which is what the launcher trie does).
+
+**Inputs.**
+- Documents: up to 500 clips (the first 4,000 characters of each), or the notes.
+- A query of up to 200 characters, matched case-insensitively.
+
+**Output.** The documents containing the query.
+
+**Construction (prefix doubling).** The documents are lower-cased and joined with a separator `\0` that no query contains, so no match can cross two documents.
+
+```
+rank[i] = rank of character i (characters compressed to 0..σ−1)
+sa = suffixes sorted by first character (counting sort)
+for k = 1, 2, 4, …:
+    order by second key: suffixes with i + k ≥ n first, then sa[j] − k for sa[j] ≥ k
+    stable counting sort of that order by rank[i]          ← radix sort on (rank[i], rank[i+k])
+    new ranks: equal pairs share a rank
+    stop when all n ranks differ
+search(q): lo = first suffix ≥ q, hi = first suffix > q·∞   (two binary searches)
+           documents of sa[lo..hi), each once
+```
+
+**Correctness.** After the round with step k, suffixes are sorted by their first 2k characters. A pair (rank of the first k, rank of the next k) orders suffixes exactly as their first 2k characters do, and the radix sort sorts by that pair. It ends when every rank is distinct, which means the full suffixes are sorted (at most ⌈log₂ n⌉ rounds). All suffixes starting with q are contiguous in sorted order, and the two binary searches find that block. Tests compare the array against a brute-force sort of 200 random strings, and search against a KMP scan for 300 queries over 300 documents.
+
+**Cost.**
+- Build: O(n log n) time, O(n) extra memory.
+- Query: O(m log n + occurrences).
+- Baseline: O(n) per query (scanning every clip with KMP).
+- Measured: 55–81× faster per query. The index is rebuilt only when the history has changed and someone searches.
+
+**Failure handling.**
+- Empty query → nothing.
+- Query containing the separator → nothing.
+- Over-long query → 400.
+- Damaged entries in the saved history are skipped on load.
+
+**Tests:**
+- `SuffixIndexTest`, 6 tests: edges (no documents, empty documents and queries); "banana" and "aaaa"; substring search; no cross-document matches with a limit (boundary); random strings against brute force and against a scan; Unicode and a stray separator.
+- `ClipboardHistoryTest`, 5 tests: newest first, repeats merged; secrets skipped; search and index rebuild; the 500 cap with pinned clips (boundary); persistence and kinds.
+
+---
+
+## 7. Segment tree: screen time (Unit 3 · CO2)
+
+**Code:** `algo/tree/SegmentTree.java`, used by `activity/ScreenTime.java`.
+
+**Problem.** Notchi records which app is in front, as spans. The Activity page asks range questions:
+- time in an app today, or between two times;
+- 24 hourly totals and the busiest hour;
+- for Workspaces, which apps were used in each 15-minute block.
+
+At the same time, tracking keeps adding seconds to minutes.
+
+**Inputs.**
+- Spans `{app, name, start, end}`. Each must end after it starts, be at most 12 h long and not end in the future.
+- The UTC offset, which sets the local day and minute.
+
+**Output.** Totals, per-app times, hourly bars, busiest hour, longest focus run, range sums.
+
+**Structure.** For each day: one tree per app plus one for all apps. Each has 1,440 leaves, and a leaf holds the seconds that app was in front during that minute. The tree is a complete binary tree in an array, with leaves at [size, 2·size). Each internal node stores the sum and the max of its range.
+
+```
+add(i, x):  p = size + i; leaf += x; walk up: sum[p] = sum[2p] + sum[2p+1], max[p] = max(...)
+sum(l, r):  a = l + size, b = r + size
+            while a < b: if a odd: take a++; if b odd: take --b; a /= 2; b /= 2
+argMax(l,r): target = max(l, r); descend from the root to the leftmost leaf in [l, r) with value ≥ target
+```
+
+A span is split into minute pieces, across midnight too. A minute never gets more than 60 seconds. Spans can't overlap: a re-sent span only counts from where the last one ended.
+
+**Correctness.**
+- *Invariant:* every node holds the sum and max of its leaves.
+- `add` restores it along the only path that changed.
+- The iterative query takes a node exactly when it lies wholly inside [l, r) and its parent doesn't. This covers the range with at most two nodes per level and no overlaps.
+- The tests compare against a plain array over 20,000 random updates and queries.
+
+**Cost.**
+- Update and query: O(log n). Space: O(n).
+- Plain array: O(r − l) per query. Prefix sums: O(n) per update.
+- Measured for 20,000 mixed operations over a million buckets: 3.3 ms, against 806 ms (array) and about 3.2 s (prefix sums).
+
+**Failure handling.**
+- Invalid spans → 400.
+- Bad UTC offsets → 400.
+- Overlapping or re-sent spans → clamped.
+- Idle for 2 minutes, sleep, or a locked screen → the app stops the span.
+- Days older than 35 are dropped.
+- Damaged lines in the saved history are skipped.
+
+**Tests:**
+- `SegmentTreeTest`, 5 tests: edges (empty ranges, size 1); sums, maxima and argmax over minute buckets; set and add; bounds; random operations against a plain array.
+- `ScreenTimeTest`, 6 tests: empty; summary and busiest hour; no double counting; a span across midnight and longest focus (boundary); validation and persistence; a batch with one bad span changes nothing, and a torn history file still loads.
+
+---
+
+## 8. Union–find: workspaces (Unit 2 · CO2)
+
+**Code:** `algo/dsu/DisjointSet.java`, used by `activity/Workspaces.java`.
+
+**Problem.** Group apps that you keep using together, so one click opens the whole group. "Together" is transitive: Figma–Slack plus Slack–Chrome is one design workspace. So the groups are the connected components of a "used together" graph.
+
+**Inputs.** The last 14 days of screen time, cut into 15-minute blocks. For each block, the apps that were in front for at least a minute.
+
+**Output.** Up to 6 workspaces, each with 2–6 apps, ordered by total time.
+
+**Steps.**
+1. Count, for every pair of apps, the blocks they share.
+2. Leave out system apps such as Finder, Notchi and System Settings. Otherwise they would join everything into one group.
+3. Union two apps when they share at least 3 blocks and their **Jaccard similarity** (shared blocks ÷ blocks where either is used) is at least 0.4.
+
+   A browser used with everything has a low similarity to each single app, so it can't chain "coding" and "design" into one group.
+4. Every set with two or more apps is a workspace.
+5. An app left on its own joins each workspace it is used with in at least half of that workspace's blocks. So Chrome can belong to both "coding" and "design".
+6. Workspaces you've dismissed are hidden.
+
+```
+find(x):     follow parents to the root, then point every node on the path at the root   (path compression)
+union(a, b): ra, rb = find(a), find(b); if equal: return
+             attach the lower-rank root under the higher one; equal ranks: rank += 1  (union by rank)
+```
+
+**Correctness.**
+- After each union, two elements share a root exactly when a chain of unions connects them.
+- Path compression only re-points nodes at their own root, so it never changes a set.
+- Union by rank keeps trees O(log n) deep even without compression. With compression, m operations cost O(m α(n)).
+- The tests compare against BFS connected components over random edges, and check a 100,000-element chain.
+
+**Cost.**
+- Building the groups: O(B · a² + P α(A)) for B blocks of at most a apps and P pairs. That is tiny for a real Mac.
+- The data structure itself: O(α(n)) per operation, against O(n + e) per BFS recomputation.
+- Measured: 766× faster at 100,000 apps with 1,000 questions.
+
+**Failure handling.**
+- No data → no workspaces.
+- Apps used together only once → not grouped.
+- Dismissing needs at least two apps.
+- Apps that aren't installed any more simply don't open.
+
+**Tests:**
+- `DisjointSetTest`, 6 tests: edges; transitivity; repeated unions; groups; a 100,000-element chain (boundary); random unions against BFS.
+- `WorkspacesTest`, 5 tests: empty; the demo week gives a coding and a design workspace, with Finder ignored as a hub; a browser used with both joins both instead of merging them; one-off co-use isn't grouped; dismissal.
+
+---
+
 ## Supporting code (not assessed algorithms)
 
 - `json/Json.java`: a recursive-descent JSON parser and writer. It caps nesting at 64 levels so deep input can't overflow the stack. `JsonTest` has 5 tests.
-- `http/ApiServer.java`: a router on the JDK HTTP server. It maps exceptions to 400, 403, 404, 405, 409, 413 and 500. It listens on 127.0.0.1 only, and refuses requests that carry an `Origin` header (web pages) or a foreign `Host` (DNS rebinding).
-- `http/NotchiApi.java`: the endpoints and input validation. Every LIVE response carries a queue `version`, so the app ignores an older order that arrives after a newer one. `ApiServerTest` has 6 end-to-end tests that make real HTTP calls against a server on a random port.
+- `http/ApiServer.java`: a router on the JDK HTTP server.
+  - It maps exceptions to 400, 401, 403, 404, 405, 409, 413 and 500.
+  - It listens on 127.0.0.1 only, and refuses requests that carry an `Origin` header (web pages) or a foreign `Host` (DNS rebinding).
+  - When started by Notchi, it also requires a secret `X-Notchi-Token` (kept in the Keychain) on everything except `/api/health`.
+- `http/NotchiApi.java`: the endpoints and input validation. Every LIVE response carries a queue `version`, so the app ignores an older order that arrives after a newer one. `ApiServerTest` has 8 end-to-end tests that make real HTTP calls against a server on a random port.
