@@ -178,7 +178,11 @@ public final class DurationStats {
 
     private void load(Path f) {
         try {
-            for (String line : Files.readAllLines(f, StandardCharsets.UTF_8)) {
+            String content = StandardCharsets.UTF_8.newDecoder()
+                    .onMalformedInput(java.nio.charset.CodingErrorAction.REPLACE)
+                    .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPLACE)
+                    .decode(java.nio.ByteBuffer.wrap(Files.readAllBytes(f))).toString();
+            for (String line : content.split("\n")) {
                 String[] p = line.split(",");
                 if (p.length != 3) continue;
                 try {
@@ -189,7 +193,7 @@ public final class DurationStats {
                 }
             }
         } catch (IOException ex) {
-            throw new UncheckedIOException("couldn't read " + f, ex);
+            System.err.println("[notchi-backend] couldn't read " + f + ": " + ex.getMessage());
         }
     }
 
