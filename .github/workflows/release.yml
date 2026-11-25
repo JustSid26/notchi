@@ -32,10 +32,18 @@ jobs:
           rm cert.p12
           echo "SIGN_ID=Notchi Self-Signed" >> "$GITHUB_ENV"
 
-      - name: Build app (universal)
+      - name: Test the Java backend
+        run: |
+          export JAVA_HOME="${JAVA_HOME_21_arm64:-$JAVA_HOME}"
+          cd backend && ./mvnw -q test
+
+      - name: Build app (universal, with the backend bundled)
         env:
           ARCHS: "--arch arm64 --arch x86_64"
-        run: ./scripts/build-app.sh
+        run: |
+          export JAVA_HOME="${JAVA_HOME_21_arm64:-$JAVA_HOME}"
+          ./scripts/build-app.sh
+          test -f build/Notchi.app/Contents/Resources/notchi-backend.jar || { echo "::error::backend jar was not bundled"; exit 1; }
 
       - name: Package DMG
         run: ./scripts/make-dmg.sh

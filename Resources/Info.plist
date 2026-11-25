@@ -2,44 +2,43 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key>
-    <string>Notchi</string>
-    <key>CFBundleDisplayName</key>
-    <string>Notchi</string>
-    <key>CFBundleIdentifier</key>
-    <string>dev.notchi.app</string>
-    <key>CFBundleExecutable</key>
-    <string>Notchi</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>0.1.0</string>
-    <key>CFBundleVersion</key>
-    <string>1</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>14.0</string>
-    <key>LSUIElement</key>
-    <true/>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>NSAppleEventsUsageDescription</key>
-    <string>Notchi shows what's playing in Spotify and Music, and reads, focuses and types into your pinned terminal tabs (iTerm2 / Terminal).</string>
-    <key>NSAppTransportSecurity</key>
-    <dict>
-        <!-- Lets Notchi talk to its Java backend over plain HTTP on 127.0.0.1. -->
-        <key>NSAllowsLocalNetworking</key>
-        <true/>
-    </dict>
-    <key>CFBundleURLTypes</key>
-    <array>
-        <dict>
-            <key>CFBundleURLName</key>
-            <string>dev.notchi.app</string>
-            <key>CFBundleURLSchemes</key>
-            <array>
-                <string>notchi</string>
-            </array>
-        </dict>
-    </array>
+	<key>CFBundleDisplayName</key>
+	<string>Notchi</string>
+	<key>CFBundleExecutable</key>
+	<string>Notchi</string>
+	<key>CFBundleIdentifier</key>
+	<string>dev.notchi.app</string>
+	<key>CFBundleName</key>
+	<string>Notchi</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.2.0</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>dev.notchi.app</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>notchi</string>
+			</array>
+		</dict>
+	</array>
+	<key>CFBundleVersion</key>
+	<string>2</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>NSAppleEventsUsageDescription</key>
+	<string>Notchi shows what's playing in Spotify and Music, and reads, focuses and types into your pinned terminal tabs (iTerm2 / Terminal).</string>
+	<key>NSHighResolutionCapable</key>
+	<true/>
 </dict>
 </plist>
