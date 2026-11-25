@@ -30,6 +30,21 @@ A Siamese cat wanders beside your notch. It sits, stretches, dozes, waves when i
 - **Ask Claude:** answers stream right in the notch, using your Anthropic API key or your local Claude Code install.
 - **Terminal tabs:** pin up to 10 iTerm2 tabs, with their real names and colours, and watch what Claude Code is doing in each one.
 
+## Notes, Clipboard and Activity
+
+The switcher at the bottom-left of the island opens three more pages. They run on the Java backend, which Notchi starts by itself if Java 21+ is installed:
+
+- **Notes:** type anything and Notchi files it.
+  - "call mom tomorrow 5pm" becomes a **reminder** that pings you on time.
+  - "buy milk" becomes a **to-do**, a URL a **link**, and a phone number or e-mail a **contact**.
+  - Code and ideas get their own groups.
+  - "wifi password: …" becomes a **password**: hidden, and stored in your Mac's Keychain.
+- **Clipboard:** everything you've copied, newest first. Click to copy again, or search inside any clip. Passwords, and anything a password manager marks as private, are never kept.
+- **Activity:** today's screen time per app, an hourly chart, your busiest hour and longest focus run.
+  - **Workspaces** are apps you keep using together, like Figma + Slack + Chrome. One click opens them all.
+
+Everything stays on your Mac. Screen time records only which app is in front, never window titles or content. You can turn off clipboard history and screen time in Settings → Java backend.
+
 ## Make it yours
 
 - **Pets:** a cat (Siamese, Ginger, Cream, Midnight, Smoky), a dog (Shiba, Golden, Choco) or a bird (Budgie, Cockatiel, Bluebird), in any size.
@@ -105,12 +120,13 @@ Under the hood each of these opens a URL, so anything that can open a URL can dr
 
 ## Java backend (optional)
 
-`backend/` is a plain-Java service that Notchi connects to when it's running on the same Mac. It takes over the algorithmic work:
+`backend/` is a plain-Java service that Notchi connects to when it's running on the same Mac. Notchi starts it by itself when Java 21+ is installed (or run it yourself as below). It does the algorithmic work:
 
 - **LIVE queue order:** an indexed binary heap.
 - **Duplicate events** (retried webhooks, hooks that fire twice): screened by a Bloom filter backed by an exact event log.
 - **Launcher:** type in the Claude bar to find apps, tabs and commands, using a trie.
 - **Claude ETA** in each terminal tab: percentiles by randomized Quickselect.
+- **Notes** sorted by Aho–Corasick, **Clipboard** search with a suffix array, **Screen time** with segment trees, and **Workspaces** with union–find.
 
 ```bash
 cd backend && ./mvnw -q package -DskipTests && java -jar target/notchi-backend.jar --demo
@@ -152,7 +168,7 @@ Sources/Notchi/
   Services/   now playing, pinned apps, Claude, terminal tabs, iTerm2 colours, live activities, shortcuts
   Settings/   preferences, themes, settings window
 bin/island    CLI (live activities, terminal tabs, Claude Code hooks)
-backend/      optional Java backend (heap, Bloom filter, trie, randomized Quickselect)
+backend/      Java backend: heap, Bloom filter, trie, Quickselect, Aho–Corasick, suffix array, segment tree, union–find
 ```
 
 ## License
