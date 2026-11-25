@@ -22,6 +22,8 @@ struct ExpandedView: View {
         let catX: CGFloat = hPad + 6
         let catY = header + 5 - CatRenderer.peekLedge * k
         let hasTabs = !terminals.tabs.isEmpty
+        let page = c.page
+        let showRail = hasTabs && page == .home
 
         VStack(spacing: 10) {
             HeaderRow(c: c, battery: battery, settings: settings, terminals: terminals, leadingInset: settings.showCat ? catW + 8 : 0)
@@ -29,30 +31,44 @@ struct ExpandedView: View {
             if settings.dock == .notch {
                 // Landscape: hangs from the notch. Terminal tabs get a rail on the left.
                 HStack(alignment: .top, spacing: 10) {
-                    if hasTabs {
+                    if showRail {
                         TerminalRail(terminals: terminals)
                             .frame(width: Metrics.railWidth, height: 84 + 10 + 56 + 10 + 38)
                             .transition(.move(edge: .leading).combined(with: .opacity))
                     }
                     VStack(spacing: 10) {
-                        HStack(spacing: 10) {
-                            NowPlayingCard(media: media).frame(maxWidth: .infinity)
-                            ActivitiesCard(activities: activities, battery: battery).frame(width: 200)
+                        switch page {
+                        case .home:
+                            HStack(spacing: 10) {
+                                NowPlayingCard(media: media).frame(maxWidth: .infinity)
+                                ActivitiesCard(activities: activities, battery: battery).frame(width: 200)
+                            }
+                            .frame(height: 84)
+                            HStack(spacing: 8) {
+                                AppsRow(c: c, apps: apps)
+                                IslandControls(c: c, settings: settings, terminals: terminals)
+                                    .padding(.horizontal, 6)
+                                    .frame(maxHeight: .infinity)
+                                    .background(CardBackground())
+                            }
+                            .frame(height: 56)
+                        case .notes:
+                            NotesPage(model: c.notes, backend: c.backend).frame(height: 84 + 10 + 56)
+                        case .clipboard:
+                            ClipboardPage(model: c.clips, backend: c.backend, settings: settings).frame(height: 84 + 10 + 56)
+                        case .activity:
+                            ActivityPage(model: c.activity, backend: c.backend, settings: settings).frame(height: 84 + 10 + 56)
                         }
-                        .frame(height: 84)
+                        // Page switcher, then the page's own input on the bottom row.
                         HStack(spacing: 8) {
-                            AppsRow(c: c, apps: apps)
-                            IslandControls(c: c, settings: settings, terminals: terminals)
-                                .padding(.horizontal, 6)
-                                .frame(maxHeight: .infinity)
-                                .background(CardBackground())
+                            PageBar(c: c)
+                            PageInput(c: c, claude: claude, terminals: terminals)
                         }
-                        .frame(height: 56)
-                        ClaudeBar(c: c, claude: claude, terminals: terminals).frame(height: 38)
+                        .frame(height: 38)
                     }
-                    .frame(width: Metrics.expandedWidth(.notch) - 2 * hPad)
+                    .frame(width: c.expandedWidth - 2 * hPad - (showRail ? Metrics.railWidth + 10 : 0))
                 }
-            } else {
+            } else if page == .home {
                 // Portrait: docked to the left edge.
                 NowPlayingCard(media: media, vertical: true).frame(height: 156)
                 ActivitiesCard(activities: activities, battery: battery, maxRows: 1).frame(height: 76)
@@ -61,13 +77,25 @@ struct ExpandedView: View {
                 }
                 AppsGrid(c: c, apps: apps).frame(height: 116)
                 ClaudeBar(c: c, claude: claude, terminals: terminals).frame(height: 38)
+            } else {
+                // Portrait pages fill the island; the switcher is in the header.
+                Group {
+                    switch page {
+                    case .notes: NotesPage(model: c.notes, backend: c.backend)
+                    case .clipboard: ClipboardPage(model: c.clips, backend: c.backend, settings: settings)
+                    default: ActivityPage(model: c.activity, backend: c.backend, settings: settings, vertical: true)
+                    }
+                }
+                .frame(maxHeight: .infinity)
+                PageInput(c: c, claude: claude, terminals: terminals).frame(height: 38)
+                    .padding(.bottom, 14)
             }
-            if let tab = terminals.selected {
+            if page == .home, let tab = terminals.selected {
                 // Clicking a terminal tab grows the island to show that tab's conversation.
                 TranscriptPanel(tab: tab, store: transcript, terminals: terminals)
                     .frame(height: Metrics.transcriptHeight(settings.dock))
                     .transition(.opacity.combined(with: .move(edge: .top)))
-            } else if claude.hasAnswer {
+            } else if page == .home, claude.hasAnswer {
                 AnswerPanel(claude: claude)
                     .frame(height: Metrics.answerHeight)
                     .transition(.opacity.combined(with: .move(edge: .top)))
@@ -86,6 +114,7 @@ struct ExpandedView: View {
             }
         }
         .animation(c.spring, value: claude.hasAnswer)
+        .animation(c.spring, value: c.page)
         .animation(c.spring, value: terminals.selectedID)
         .animation(c.spring, value: terminals.tabs.count)
     }
@@ -106,8 +135,13 @@ struct HeaderRow: View {
             if leadingInset == 0 {
                 Image(systemName: "pawprint.fill").font(.system(size: 11)).foregroundStyle(Color.islandAccent)
             }
-            Text("Notchi").font(.system(size: 12, weight: .semibold, design: .rounded))
-                .foregroundStyle(.white.opacity(0.8))
+            if settings.dock == .notch {
+                Text("Notchi").font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white.opacity(0.8))
+            } else {
+                // The left-edge header takes clicks, so the page switcher lives here.
+                PageBar(c: c)
+            }
             // Leave room for the hardware notch when hanging from it.
             Spacer(minLength: settings.dock == .notch ? c.geometry.notchWidth + 12 : 8)
             if battery.hasBattery {
@@ -569,6 +603,22 @@ struct AppTile: View {
         }
         .help(app.name)
         .frame(width: 46)
+    }
+}
+
+/// The bottom row's input for the current page.
+struct PageInput: View {
+    @ObservedObject var c: IslandController
+    @ObservedObject var claude: ClaudeSession
+    @ObservedObject var terminals: TerminalTabs
+
+    var body: some View {
+        switch c.page {
+        case .home: ClaudeBar(c: c, claude: claude, terminals: terminals)
+        case .notes: NoteInputBar(model: c.notes, backend: c.backend)
+        case .clipboard: ClipSearchBar(model: c.clips)
+        case .activity: WorkspacesBar(model: c.activity)
+        }
     }
 }
 

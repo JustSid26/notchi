@@ -25,6 +25,8 @@ final class IslandController: ObservableObject {
     @Published private(set) var isOpen = false
     @Published private(set) var peek: Peek?
     @Published private(set) var focusToken = 0
+    /// Home, Notes, Clipboard or Activity. Back to Home whenever the island closes.
+    @Published var page: IslandPage = .home
     var pendingFocus = false
     /// Cursor position in island-panel coordinates (read by the peeking cat's eyes).
     private(set) var islandMouse: CGPoint = .zero
@@ -40,7 +42,11 @@ final class IslandController: ObservableObject {
     let transcript = TranscriptStore()
     /// The optional Java backend (LIVE heap, Bloom filter, launcher trie, Claude ETA).
     let backend = Backend.shared
+    let notes = NotesModel()
+    let clips = ClipsModel()
+    let activity = ActivityModel()
     private var lastCatalogUpload = Date.distantPast
+    private var reminderTimer: Timer?
 
     private(set) var panel: NotchPanel!       // the island
     private(set) var catPanel: NotchPanel!    // the cat strip under the menu bar
@@ -74,8 +80,9 @@ final class IslandController: ObservableObject {
     var expandedWidth: CGFloat { Metrics.expandedWidth(dock, rail: hasTerminals) }
     var headerHeight: CGFloat { dock == .notch ? geometry.notchHeight : Metrics.edgeHeaderHeight }
     var expandedHeight: CGFloat {
-        Metrics.expandedHeight(dock, header: headerHeight, answer: claude.hasAnswer, terminals: hasTerminals,
-                               terminalCount: terminals.tabs.count, transcript: showsTranscript)
+        Metrics.expandedHeight(dock, header: headerHeight, answer: claude.hasAnswer && page == .home,
+                               terminals: hasTerminals, terminalCount: terminals.tabs.count,
+                               transcript: showsTranscript && page == .home)
     }
 
     // MARK: - Lifecycle
@@ -459,7 +466,10 @@ final class IslandController: ObservableObject {
 
     func close() {
         guard isOpen else { return }
-        withAnimation(.spring(response: 0.38, dampingFraction: 0.86)) { isOpen = false }
+        withAnimation(.spring(response: 0.38, dampingFraction: 0.86)) {
+            isOpen = false
+            page = .home
+        }
         backdrop.show(false, below: nil)
         terminals.islandOpen = false
         panel.ignoresMouseEvents = true
@@ -527,6 +537,11 @@ final class IslandController: ObservableObject {
             self.backend.refreshEtas(for: self.terminals.tabs)
         }
         backend.start()
+        ClipboardMonitor.shared.start()
+        ActivityMonitor.shared.start()
+        // Reminders from Notes: announce each one when it's due.
+        reminderTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in self?.checkReminders() }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in self?.checkReminders() }
         // Pinned tabs changed: they're launcher items, and each has its own ETA.
         // (Tabs also change on every title poll while Claude works; only ids and names matter here.)
         terminals.$tabs.dropFirst()
@@ -551,6 +566,20 @@ final class IslandController: ObservableObject {
                 if Date().timeIntervalSince(self.lastCatalogUpload) > 600 { self.uploadCatalog() }
             }
             .store(in: &bag)
+    }
+
+    private func checkReminders() {
+        backend.dueReminders { [weak self] due in
+            guard let self else { return }
+            for n in due.prefix(5) {
+                self.activities.push(["id": "reminder-\(n.id)", "title": String(n.text.prefix(120)), "subtitle": "Reminder",
+                                      "state": "attention", "icon": "bell.fill", "tint": "orange", "ttl": "600",
+                                      "event": "reminder-\(n.id)"])
+                if self.settings.claudeSound { NSSound(named: NSSound.Name("Ping"))?.play() }
+                self.cat.surprise()
+                self.backend.updateNote(n.id, ["fired": true]) { [weak self] in self?.notes.refresh() }
+            }
+        }
     }
 
     private func uploadCatalog() {
@@ -630,6 +659,10 @@ final class IslandController: ObservableObject {
         case "push", "activity": activities.push(q)
         case "end": if let id = q["id"] { activities.end(id: id) }
         case "open": open(.programmatic)
+        case "page":
+            // notchi://page?to=notes|clipboard|activity|home
+            open(.programmatic)
+            DispatchQueue.main.async { withAnimation(self.spring) { self.page = IslandPage(rawValue: q["to"] ?? "") ?? .home } }
         case "ask":
             open(.programmatic)
             if let question = q["q"], !question.isEmpty { claude.ask(question) }

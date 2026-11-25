@@ -31,6 +31,10 @@ struct BackendSection: View {
     var body: some View {
         Section {
             Toggle("Use the Java backend when it's running", isOn: $settings.useBackend)
+            Toggle("Start it automatically (needs Java 21+)", isOn: $settings.autoStartBackend)
+                .disabled(BackendLauncher.bundledJar == nil)
+            Toggle("Keep clipboard history (skips passwords it can recognise)", isOn: $settings.recordClipboard)
+            Toggle("Record screen time (app names only)", isOn: $settings.trackScreenTime)
             LabeledContent("Status") {
                 if backend.connected {
                     Text("Connected · v\(backend.version ?? "?") · 127.0.0.1:7340").foregroundStyle(.green)
@@ -63,6 +67,19 @@ struct BackendSection: View {
                 LabeledContent("Claude ETA") {
                     Text("\(int(runs, "runs")) runs recorded · randomized Quickselect")
                 }
+                let notes = dict("notes"), clip = dict("clipboard"), st = dict("screenTime"), ws = dict("workspaces")
+                LabeledContent("Notes") {
+                    Text("\(int(notes, "all")) notes · sorted by Aho–Corasick")
+                }
+                LabeledContent("Clipboard") {
+                    Text("\(int(clip, "clips")) clips · \(int(clip, "secretsSkipped")) passwords skipped · suffix array")
+                }
+                LabeledContent("Screen time") {
+                    Text("\(int(st, "days")) days · \(int(st, "segmentTrees")) segment trees")
+                }
+                LabeledContent("Workspaces") {
+                    Text("\(int(ws, "apps")) apps · \(int(ws, "strongPairs")) strong pairs · union–find")
+                }
                 HStack {
                     Picker("Expected events", selection: $expected) {
                         ForEach(Self.expectedChoices, id: \.self) { n in
@@ -86,11 +103,14 @@ struct BackendSection: View {
                 }
                 if let message { Text(message).font(.caption).foregroundStyle(.secondary) }
             } else if settings.useBackend {
+                if let problem = backend.problem {
+                    Text(problem).font(.caption).foregroundStyle(.orange)
+                }
                 Text("Start it from the repository:").font(.caption).foregroundStyle(.secondary)
                 Text(Backend.startCommand).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
             }
         } header: { Text("Java backend") } footer: {
-            Text("Optional. When the backend runs, it orders the LIVE queue (heap), drops repeated events (Bloom filter + exact log), answers the launcher as you type in the Claude bar (trie), and estimates how long Claude usually takes in each tab (randomized Quickselect). Without it, Notchi works on its own.")
+            Text("The backend runs Notes (sorted by Aho–Corasick), Clipboard history (suffix-array search), Screen time (segment trees) and Workspaces (union–find). It also orders the LIVE queue (heap), drops repeated events (Bloom filter), answers the launcher (trie) and estimates Claude's run time (randomized Quickselect). Everything stays on this Mac; passwords in notes go to your Keychain and are never kept in clipboard history.")
                 .font(.caption).foregroundStyle(.secondary)
         }
         .onAppear { backend.refreshStats() }
