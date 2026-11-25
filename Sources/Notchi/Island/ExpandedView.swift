@@ -493,28 +493,38 @@ struct AppsRow: View {
     }
 
     private var pinned: some View {
-        HStack(spacing: 6) {
-            ForEach(Array(apps.apps.enumerated()), id: \.element.id) { i, app in
-                AppTile(app: app, index: i) { c.launch(app) }
-                    .contextMenu { Button("Unpin \(app.name)") { apps.remove(app) } }
-            }
-            if apps.apps.count < AppShelf.maxApps {
-                Button { c.addApps() } label: {
-                    Image(systemName: "plus").font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(.white.opacity(0.6))
-                        .frame(width: 40, height: 40)
-                        .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .strokeBorder(.white.opacity(0.2), style: StrokeStyle(lineWidth: 1, dash: [3, 3])))
+        // More apps than fit scroll sideways (trackpad swipe, or shift + mouse wheel).
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                ForEach(Array(apps.apps.enumerated()), id: \.element.id) { i, app in
+                    AppTile(app: app, index: i) { c.launch(app) }
+                        .contextMenu { Button("Unpin \(app.name)") { apps.remove(app) } }
                 }
-                .buttonStyle(.plain)
-                .help("Pin an app — or drag one here")
+                if apps.apps.count < AppShelf.maxApps {
+                    Button { c.addApps() } label: {
+                        Image(systemName: "plus").font(.system(size: 14, weight: .semibold))
+                            .foregroundStyle(.white.opacity(0.6))
+                            .frame(width: 40, height: 40)
+                            .background(RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .strokeBorder(.white.opacity(0.2), style: StrokeStyle(lineWidth: 1, dash: [3, 3])))
+                    }
+                    .buttonStyle(.plain)
+                    .help("Pin an app — or drag one here")
+                }
+                if apps.apps.isEmpty {
+                    Text("Drop apps here").font(.system(size: 12, design: .rounded)).foregroundStyle(.white.opacity(0.4))
+                }
             }
-            if apps.apps.isEmpty {
-                Text("Drop apps here").font(.system(size: 12, design: .rounded)).foregroundStyle(.white.opacity(0.4))
-            }
-            Spacer(minLength: 0)
+            .padding(.horizontal, 10)
+            .frame(maxHeight: .infinity)
         }
-        .padding(.horizontal, 8)
+        .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
+        // Soft edges hint that there's more to scroll to.
+        .mask(HStack(spacing: 0) {
+            LinearGradient(colors: [.clear, .black], startPoint: .leading, endPoint: .trailing).frame(width: 8)
+            Rectangle()
+            LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing).frame(width: 8)
+        })
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(CardBackground(highlighted: dropTargeted))
         .onDrop(of: [.fileURL], isTargeted: $dropTargeted) { apps.handleDrop($0) }
