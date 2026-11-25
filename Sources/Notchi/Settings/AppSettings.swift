@@ -216,6 +216,9 @@ final class AppSettings: ObservableObject {
         static let islandStyle = "islandStyle"
         static let islandOpacity = "islandOpacity"
         static let useBackend = "useJavaBackend"
+        static let autoStartBackend = "autoStartBackend"
+        static let recordClipboard = "recordClipboard"
+        static let trackScreenTime = "trackScreenTime"
     }
 
     @Published var showCat: Bool { didSet { d.set(showCat, forKey: K.showCat) } }
@@ -224,6 +227,12 @@ final class AppSettings: ObservableObject {
     @Published var claudeSound: Bool { didSet { d.set(claudeSound, forKey: K.claudeSound) } }
     /// Use the Java backend (backend/ in the repo) when it's running on this Mac.
     @Published var useBackend: Bool { didSet { d.set(useBackend, forKey: K.useBackend) } }
+    /// Start the bundled backend (needs Java 21+) when it isn't already running.
+    @Published var autoStartBackend: Bool { didSet { d.set(autoStartBackend, forKey: K.autoStartBackend) } }
+    /// Keep a history of copied text (never passwords or anything a password manager marks as concealed).
+    @Published var recordClipboard: Bool { didSet { d.set(recordClipboard, forKey: K.recordClipboard) } }
+    /// Record which app is in front, for the Activity page and Workspaces.
+    @Published var trackScreenTime: Bool { didSet { d.set(trackScreenTime, forKey: K.trackScreenTime) } }
     @Published var coat: CatCoat { didSet { d.set(coat.rawValue, forKey: K.coat) } }
     @Published var dogCoat: DogCoat { didSet { d.set(dogCoat.rawValue, forKey: K.dogCoat) } }
     @Published var birdCoat: BirdCoat { didSet { d.set(birdCoat.rawValue, forKey: K.birdCoat) } }
@@ -277,6 +286,9 @@ final class AppSettings: ObservableObject {
         pet = Pet(rawValue: d.string(forKey: K.pet) ?? "") ?? .cat
         claudeSound = d.object(forKey: K.claudeSound) as? Bool ?? true
         useBackend = d.object(forKey: K.useBackend) as? Bool ?? true
+        autoStartBackend = d.object(forKey: K.autoStartBackend) as? Bool ?? true
+        recordClipboard = d.object(forKey: K.recordClipboard) as? Bool ?? true
+        trackScreenTime = d.object(forKey: K.trackScreenTime) as? Bool ?? true
         dogCoat = DogCoat(rawValue: d.string(forKey: K.dogCoat) ?? "") ?? .shiba
         birdCoat = BirdCoat(rawValue: d.string(forKey: K.birdCoat) ?? "") ?? .budgie
         walkRange = d.double(forKey: K.walkRange)

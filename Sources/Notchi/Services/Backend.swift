@@ -41,6 +41,10 @@ final class Backend: ObservableObject {
 
     @Published private(set) var connected = false
     @Published private(set) var version: String?
+    /// What the running backend can do (an older backend lacks the newer pages).
+    @Published private(set) var features: Set<String> = []
+    /// Why the backend can't be used, if it can't (shown on the pages and in Settings).
+    @Published var problem: String?
     /// The backend's /api/stats (shown in Settings).
     @Published private(set) var stats: [String: Any] = [:]
     /// Claude run-time percentiles per terminal tab (key: lower-cased tab name).
@@ -73,6 +77,19 @@ final class Backend: ObservableObject {
     private var inFlight: (op: LiveOp, token: Int)?
     private var opToken = 0
 
+    /// The key the backend requires (X-Notchi-Token). Made once, kept in the Keychain, and given
+    /// to the backend Notchi starts, so other programs can't read your notes or clipboard.
+    static let token: String = {
+        if let t = Keychain.get(account: "backend-token"), t.count >= 32 { return t }
+        var bytes = [UInt8](repeating: 0, count: 32)
+        _ = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        let t = bytes.map { String(format: "%02x", $0) }.joined()
+        Keychain.set(t, account: "backend-token")
+        return t
+    }()
+
+    func supports(_ feature: String) -> Bool { features.contains(feature) }
+
     private init() {
         let cfg = URLSessionConfiguration.ephemeral
         cfg.timeoutIntervalForRequest = 2
@@ -93,6 +110,8 @@ final class Backend: ObservableObject {
             guard let self else { return }
             let v = r?.json["version"] as? String
             if v != self.version { self.version = v }   // publish only real changes (no re-render every 5 s)
+            let f = Set(r?.json["features"] as? [String] ?? [])
+            if f != self.features { self.features = f }
             let ok = r?.json["status"] as? String == "ok"
             let inst = r?.json["instance"] as? String
             if ok, self.connected, inst != self.instance {
@@ -101,6 +120,7 @@ final class Backend: ObservableObject {
             }
             self.instance = inst
             self.setConnected(ok)
+            if !ok { BackendLauncher.launchIfNeeded() }   // start the bundled backend if we have one
         }
     }
 
@@ -141,6 +161,7 @@ final class Backend: ObservableObject {
         guard let url = comps.url else { done?(nil); return }
         var req = URLRequest(url: url)
         req.httpMethod = method
+        req.setValue(Self.token, forHTTPHeaderField: "X-Notchi-Token")
         if let json {
             // JSONSerialization raises (not throws) on NaN or infinity; never let that crash the app.
             guard JSONSerialization.isValidJSONObject(json),
@@ -159,6 +180,10 @@ final class Backend: ObservableObject {
                     self?.setConnected(false)
                     done?(nil)
                 } else {
+                    if status == 401 {
+                        let msg = "The running backend was started with a different key. Quit it and Notchi will start its own."
+                        if self?.problem != msg { self?.problem = msg }
+                    }
                     done?(Response(status: status, json: obj))
                 }
             }

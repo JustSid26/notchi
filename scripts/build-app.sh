@@ -24,6 +24,14 @@ cp "$BIN" "$APP/Contents/MacOS/Notchi"
 cp Resources/Info.plist "$APP/Contents/Info.plist"
 cp bin/island "$APP/Contents/Resources/island"
 cp Resources/iterm_tabs.py "$APP/Contents/Resources/iterm_tabs.py"
+# The Java backend (notes, clipboard, screen time, workspaces…). Notchi starts it by itself
+# when Java 21+ is installed, and works without it otherwise.
+if [ -f backend/pom.xml ] && { [ -n "${JAVA_HOME:-}" ] || /usr/libexec/java_home -v 21+ >/dev/null 2>&1; }; then
+  (cd backend && ./mvnw -q package -DskipTests) || echo "warning: backend build failed; Notchi will run without it"
+fi
+if [ -f backend/target/notchi-backend.jar ]; then
+  cp backend/target/notchi-backend.jar "$APP/Contents/Resources/notchi-backend.jar"
+fi
 chmod +x "$APP/Contents/Resources/island"
 [ -f Resources/AppIcon.icns ] && cp Resources/AppIcon.icns "$APP/Contents/Resources/" || true
 

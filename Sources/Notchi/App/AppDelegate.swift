@@ -18,6 +18,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         pendingURLs = []
     }
 
+    func applicationWillTerminate(_ notification: Notification) {
+        ActivityMonitor.shared.saveForLater()
+        BackendLauncher.stop()
+    }
+
     func application(_ application: NSApplication, open urls: [URL]) {
         guard let controller else { pendingURLs.append(contentsOf: urls); return }
         urls.forEach { controller.handle(url: $0) }
